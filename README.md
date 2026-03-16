@@ -51,8 +51,8 @@ Public repo (this site)
 git clone https://github.com/YOUR_USERNAME/bracket-tracker.git
 cd bracket-tracker
 npm install
-cp .env.example .env.local
-# Fill in your Supabase credentials in .env.local
+cp .env
+# Fill in your Supabase credentials in .env
 npm run dev
 ```
 
