@@ -16,7 +16,7 @@ A portfolio of 1–5 million brackets was generated using an ensemble of XGBoost
 - **Bracket IDs** — every bracket has a unique short ID for easy sharing and lookup
 - **Stats** — accuracy, points, upset picks, champion distribution across the portfolio
 
-## Tech stack
+## Tech stack (for now)
 
 - **Next.js 14** (App Router) — fullstack React framework
 - **Supabase** (PostgreSQL) — bracket storage and live results
