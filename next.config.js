@@ -1,9 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: {
-    serverActions: {
-      bodySizeLimit: "2mb",
-    },
+  // Allow images from any domain (team logos if added later)
+  images: {
+    remotePatterns: [],
   },
 };
 
