@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/db";
 import type { BracketDetail, PickDetail, TournamentTeam, GameNode, Round } from "@/lib/types";
 
-export const revalidate = 30;
+export const dynamic = 'force-dynamic';
 
 const ROUND_POINTS: Record<Round, number> = {
   round_64: 10, round_32: 20, sweet_16: 40,

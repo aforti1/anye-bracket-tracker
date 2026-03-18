@@ -25,7 +25,7 @@ function formatRank(rank: number | null): string {
 
 async function getBracket(hash: string): Promise<BracketDetail | null> {
   const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
-  const res = await fetch(`${baseUrl}/api/brackets/${hash}`, { next: { revalidate: 30 } });
+  const res = await fetch(`${baseUrl}/api/brackets/${hash}`, { cache: 'no-store' });
   if (!res.ok) return null;
   return res.json();
 }
