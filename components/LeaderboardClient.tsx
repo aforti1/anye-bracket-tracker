@@ -338,7 +338,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
           ...btnStyle, color: pickFilters.length > 0 ? "var(--accent)" : "var(--text-secondary)",
           borderColor: pickFilters.length > 0 ? "var(--accent-glow)" : "var(--border)",
         }}>Advanced{pickFilters.length > 0 ? ` (${pickFilters.length})` : ""}</button>
-        <button onClick={() => setShowAbout(true)} style={{
+        <button onClick={() => setShowAbout(true)} suppressHydrationWarning style={{
           ...btnStyle,
           background: "linear-gradient(135deg, #f5a623, #e8941a)",
           border: "1px solid #f5a62366",

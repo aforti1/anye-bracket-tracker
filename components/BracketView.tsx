@@ -1,6 +1,6 @@
 // components/BracketView.tsx
 "use client";
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import type { BracketDetail, PickDetail, Round } from "@/lib/types";
 
 const ROUND_LABELS: Record<Round, string> = {
@@ -17,10 +17,10 @@ const REGION_ROUNDS: Round[] = ["round_64", "round_32", "sweet_16", "elite_8"];
 
 type Status = "correct" | "wrong" | "in_progress" | "not_started";
 
-function getStatus(pick: PickDetail, gc: number): Status {
+function getStatus(pick: PickDetail, liveSet: Set<number>): Status {
   if (pick.correct === true)  return "correct";
   if (pick.correct === false) return "wrong";
-  if (pick.game_idx < gc)     return "in_progress";
+  if (liveSet.has(pick.game_idx)) return "in_progress";
   return "not_started";
 }
 
@@ -29,7 +29,18 @@ const YELLOW = "#facc15";
 interface Props { bracket: BracketDetail; }
 
 export default function BracketView({ bracket }: Props) {
-  const gc = bracket.games_decided ?? 0;
+  const [liveSet, setLiveSet] = useState<Set<number>>(new Set());
+
+  // Fetch live game indices on mount
+  useEffect(() => {
+    fetch("/api/live-games", { cache: "no-store" })
+      .then(r => r.json())
+      .then(data => {
+        const idxs: number[] = data.live_game_idxs ?? [];
+        setLiveSet(new Set(idxs));
+      })
+      .catch(() => {});
+  }, []);
 
   const byRegion = useMemo(() => {
     const map = new Map<string, Map<Round, PickDetail[]>>();
@@ -47,8 +58,8 @@ export default function BracketView({ bracket }: Props) {
 
   const correct  = bracket.correct_picks;
   const decided  = bracket.games_decided;
-  const inProg   = bracket.pick_details.filter(p => p.correct === null && p.game_idx < gc).length;
-  const upcoming = bracket.pick_details.filter(p => p.correct === null && p.game_idx >= gc).length;
+  const inProg   = bracket.pick_details.filter(p => p.correct === null && liveSet.has(p.game_idx)).length;
+  const upcoming = bracket.pick_details.filter(p => p.correct === null && !liveSet.has(p.game_idx)).length;
 
   const SLOT_H = 84;
 
@@ -64,8 +75,8 @@ export default function BracketView({ bracket }: Props) {
       <div style={{ overflowX: "auto", paddingBottom: 16 }}>
         <div style={{ display: "flex", alignItems: "stretch", minWidth: 1500, gap: 0 }}>
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-            <RegionBracket region="East"  byRound={byRegion.get("East")  ?? new Map()} gc={gc} side="left"  slotH={SLOT_H} />
-            <RegionBracket region="South" byRound={byRegion.get("South") ?? new Map()} gc={gc} side="left"  slotH={SLOT_H} />
+            <RegionBracket region="East"  byRound={byRegion.get("East")  ?? new Map()} liveSet={liveSet} side="left"  slotH={SLOT_H} />
+            <RegionBracket region="South" byRound={byRegion.get("South") ?? new Map()} liveSet={liveSet} side="left"  slotH={SLOT_H} />
           </div>
 
           <div style={{
@@ -77,7 +88,7 @@ export default function BracketView({ bracket }: Props) {
               letterSpacing: "0.08em", color: "var(--accent)",
               textAlign: "center", marginBottom: 6, textTransform: "uppercase",
             }}>Final Four</div>
-            {finalFour[0] && <MatchupCard pick={finalFour[0]} gc={gc} />}
+            {finalFour[0] && <MatchupCard pick={finalFour[0]} liveSet={liveSet} />}
           </div>
 
           <div style={{
@@ -89,7 +100,7 @@ export default function BracketView({ bracket }: Props) {
               letterSpacing: "0.08em", color: "var(--accent)",
               textAlign: "center", marginBottom: 8, textTransform: "uppercase",
             }}>Championship</div>
-            {championship && <MatchupCard pick={championship} gc={gc} champion />}
+            {championship && <MatchupCard pick={championship} liveSet={liveSet} champion />}
           </div>
 
           <div style={{
@@ -101,12 +112,12 @@ export default function BracketView({ bracket }: Props) {
               letterSpacing: "0.08em", color: "var(--accent)",
               textAlign: "center", marginBottom: 6, textTransform: "uppercase",
             }}>Final Four</div>
-            {finalFour[1] && <MatchupCard pick={finalFour[1]} gc={gc} />}
+            {finalFour[1] && <MatchupCard pick={finalFour[1]} liveSet={liveSet} />}
           </div>
 
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-            <RegionBracket region="West"    byRound={byRegion.get("West")    ?? new Map()} gc={gc} side="right" slotH={SLOT_H} />
-            <RegionBracket region="Midwest" byRound={byRegion.get("Midwest") ?? new Map()} gc={gc} side="right" slotH={SLOT_H} />
+            <RegionBracket region="West"    byRound={byRegion.get("West")    ?? new Map()} liveSet={liveSet} side="right" slotH={SLOT_H} />
+            <RegionBracket region="Midwest" byRound={byRegion.get("Midwest") ?? new Map()} liveSet={liveSet} side="right" slotH={SLOT_H} />
           </div>
         </div>
       </div>
@@ -114,9 +125,9 @@ export default function BracketView({ bracket }: Props) {
   );
 }
 
-function RegionBracket({ region, byRound, gc, side, slotH }: {
+function RegionBracket({ region, byRound, liveSet, side, slotH }: {
   region: string; byRound: Map<Round, PickDetail[]>;
-  gc: number; side: "left"|"right"; slotH: number;
+  liveSet: Set<number>; side: "left"|"right"; slotH: number;
 }) {
   const color  = REGION_COLOR[region] ?? "var(--accent)";
   const rounds = side === "left" ? REGION_ROUNDS : [...REGION_ROUNDS].reverse();
@@ -131,15 +142,15 @@ function RegionBracket({ region, byRound, gc, side, slotH }: {
       }}>{region}</div>
       <div style={{ display: "flex", flexDirection: "row", gap: 12 }}>
         {rounds.map(round => (
-          <RoundCol key={round} round={round} picks={byRound.get(round) ?? []} gc={gc} slotH={slotH} minW={140} />
+          <RoundCol key={round} round={round} picks={byRound.get(round) ?? []} liveSet={liveSet} slotH={slotH} minW={140} />
         ))}
       </div>
     </div>
   );
 }
 
-function RoundCol({ round, picks, gc, slotH, minW }: {
-  round: Round; picks: PickDetail[]; gc: number; slotH: number; minW?: number;
+function RoundCol({ round, picks, liveSet, slotH, minW }: {
+  round: Round; picks: PickDetail[]; liveSet: Set<number>; slotH: number; minW?: number;
 }) {
   const r64Count  = 8;
   const gameCount = picks.length || 1;
@@ -157,7 +168,7 @@ function RoundCol({ round, picks, gc, slotH, minW }: {
             height: slotsEach * slotH, display: "flex", alignItems: "center",
             padding: `${slotsEach * slotH * 0.3}px 0`, boxSizing: "border-box",
           }}>
-            <div style={{ width: "100%" }}><MatchupCard pick={pick} gc={gc} /></div>
+            <div style={{ width: "100%" }}><MatchupCard pick={pick} liveSet={liveSet} /></div>
           </div>
         ))}
       </div>
@@ -165,15 +176,15 @@ function RoundCol({ round, picks, gc, slotH, minW }: {
   );
 }
 
-function MatchupCard({ pick, gc, champion }: {
-  pick: PickDetail; gc: number; champion?: boolean;
+function MatchupCard({ pick, liveSet, champion }: {
+  pick: PickDetail; liveSet: Set<number>; champion?: boolean;
 }) {
-  const status   = getStatus(pick, gc);
+  const status   = getStatus(pick, liveSet);
   const winnerId = pick.predicted_winner?.team_id;
   const teamA    = pick.team_a;
   const teamB    = pick.team_b;
 
-  if (!teamA || !teamB) return <PickCard pick={pick} gc={gc} champion={champion} />;
+  if (!teamA || !teamB) return <PickCard pick={pick} liveSet={liveSet} champion={champion} />;
 
   const borderColor =
       status === "correct"       ? "var(--correct)"
@@ -236,8 +247,8 @@ function TeamRow({ team, isWinner, status, champion }: {
   );
 }
 
-function PickCard({ pick, gc, champion }: { pick: PickDetail; gc: number; champion?: boolean; }) {
-  const status   = getStatus(pick, gc);
+function PickCard({ pick, liveSet, champion }: { pick: PickDetail; liveSet: Set<number>; champion?: boolean; }) {
+  const status   = getStatus(pick, liveSet);
   const teamName = pick.predicted_winner?.name ?? "TBD";
   const seed     = pick.predicted_winner?.seed;
 
