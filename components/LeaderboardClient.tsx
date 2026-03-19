@@ -67,6 +67,8 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
   const [total, setTotal]             = useState(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  const [minUpsetsInput, setMinUpsetsInput] = useState(minUpsets);
+  const [maxUpsetsInput, setMaxUpsetsInput] = useState(maxUpsets);
 
   // Cached filtered IDs — the expensive scan result, reused for pagination
   const [filteredIds, setFilteredIds] = useState<number[] | null>(null);
@@ -292,6 +294,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
     setFilteredIds(null);
     filterKeyRef.current = "";
     setChampFilter(""); setMinUpsets(""); setMaxUpsets(""); setPickFilters([]);
+    setMinUpsetsInput(""); setMaxUpsetsInput("");
     setSort("total_points"); setOrder("desc"); setPage(1);
     try { sessionStorage.removeItem(CACHE_KEY); } catch {}
   };
@@ -326,12 +329,16 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
           {champions.map(c => <option key={c.team_id} value={String(c.team_id)}>#{c.seed} {c.name} ({smartNum(c.count)})</option>)}
         </select>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input type="number" min={0} max={32} placeholder="Min upsets" value={minUpsets}
-            onChange={e => applyFilterChange({ minUp: e.target.value })}
+          <input type="number" min={0} max={32} placeholder="Min upsets" value={minUpsetsInput}
+            onChange={e => setMinUpsetsInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") applyFilterChange({ minUp: minUpsetsInput }); }}
+            onBlur={() => { if (minUpsetsInput !== minUpsets) applyFilterChange({ minUp: minUpsetsInput }); }}
             style={{ ...inputStyle, width: 110 }} suppressHydrationWarning />
           <span style={{ color: "var(--text-muted)", fontSize: 12 }}>–</span>
-          <input type="number" min={0} max={32} placeholder="Max upsets" value={maxUpsets}
-            onChange={e => applyFilterChange({ maxUp: e.target.value })}
+          <input type="number" min={0} max={32} placeholder="Max upsets" value={maxUpsetsInput}
+            onChange={e => setMaxUpsetsInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") applyFilterChange({ maxUp: maxUpsetsInput }); }}
+            onBlur={() => { if (maxUpsetsInput !== maxUpsets) applyFilterChange({ maxUp: maxUpsetsInput }); }}
             style={{ ...inputStyle, width: 110 }} suppressHydrationWarning />
         </div>
         <button onClick={() => setShowAdvanced(true)} suppressHydrationWarning style={{

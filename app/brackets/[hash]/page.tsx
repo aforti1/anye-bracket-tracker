@@ -30,8 +30,9 @@ async function getBracket(hash: string): Promise<BracketDetail | null> {
   return res.json();
 }
 
-export default async function BracketPage({ params }: { params: { hash: string } }) {
-  const bracket = await getBracket(params.hash.toUpperCase());
+export default async function BracketPage({ params }: { params: Promise<{ hash: string }> }) {
+  const { hash } = await params;
+  const bracket = await getBracket(hash.toUpperCase());
   if (!bracket) notFound();
 
   const accuracy = formatAccuracy(bracket.correct_picks, bracket.games_decided);

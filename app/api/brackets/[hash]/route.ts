@@ -11,9 +11,10 @@ const ROUND_POINTS: Record<Round, number> = {
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { hash: string } }
+  { params }: { params: Promise<{ hash: string }> }
 ) {
-  const hash = params.hash.toUpperCase();
+  const { hash: rawHash } = await params;
+  const hash = rawHash.toUpperCase();
 
   const [bracketRes, nodesRes, teamsRes, resultsRes] = await Promise.all([
     supabase.from("brackets").select("*").eq("bracket_hash", hash).single(),
@@ -27,12 +28,8 @@ export async function GET(
   }
   const bracket = bracketRes.data;
 
-  // Use the stored rank from the DB — this matches the leaderboard
-  // which reads the same column. Both are set by update_ranks() using
-  // RANK() OVER (ORDER BY total_points DESC, correct_picks DESC).
   const rank = bracket.rank ?? null;
 
-  // Lookup maps
   const teamMap = new Map<number, TournamentTeam>(
     (teamsRes.data ?? []).map((t: TournamentTeam) => [t.team_id, t])
   );
@@ -41,12 +38,10 @@ export async function GET(
   );
   const nodeList = (nodesRes.data ?? []) as GameNode[];
 
-  // Parse picks from CSV string
   const picks: number[] = typeof bracket.picks === "string" && bracket.picks.length > 0
     ? bracket.picks.split(",").map(Number)
     : [];
 
-  // Build pick_details
   const pick_details: PickDetail[] = nodeList.map((node) => {
     const predicted_id   = picks[node.game_idx] ?? 0;
     const predicted_team = predicted_id > 0 ? (teamMap.get(predicted_id) ?? null) : null;
