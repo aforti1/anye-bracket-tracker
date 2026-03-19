@@ -91,7 +91,7 @@ export async function GET(req: NextRequest) {
 
     const { data: teams } = await supabase
       .from("tournament_teams")
-      .select("team_id, name");
+      .select("team_id, name, seed");
     const teamByName = new Map<string, number>(
       (teams ?? []).map((t: any) => [t.name.toLowerCase(), t.team_id])
     );
