@@ -1,8 +1,4 @@
 // app/api/cron/update-results/route.ts
-// Called by Vercel Cron every 15 minutes during tournament window.
-// 1. Scrapes ESPN scoreboard for completed NCAA tournament games → scores brackets
-// 2. Detects in-progress games → stores their game_idxs in metadata for live UI state
-
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceClient } from "@/lib/db";
 import { ROUND_POINTS, type Round } from "@/lib/types";
@@ -20,12 +16,81 @@ const ROUND_MAP: Record<string, Round> = {
   "Championship": "championship",
 };
 
+// Hardcoded ESPN displayName → DB team name
+const ESPN_TO_DB: Record<string, string> = {
+  "Duke Blue Devils":             "Duke",
+  "UConn Huskies":                "Connecticut",
+  "Michigan State Spartans":      "Michigan St",
+  "Kansas Jayhawks":              "Kansas",
+  "St. John's Red Storm":         "St John's",
+  "Louisville Cardinals":         "Louisville",
+  "UCLA Bruins":                  "UCLA",
+  "Ohio State Buckeyes":          "Ohio St",
+  "TCU Horned Frogs":             "TCU",
+  "UCF Knights":                  "UCF",
+  "South Florida Bulls":          "South Florida",
+  "Northern Iowa Panthers":       "Northern Iowa",
+  "California Baptist Lancers":   "Cal Baptist",
+  "North Dakota State Bison":     "N Dakota St",
+  "Furman Paladins":              "Furman",
+  "Siena Saints":                 "Siena",
+  "Michigan Wolverines":          "Michigan",
+  "Iowa State Cyclones":          "Iowa St",
+  "Virginia Cavaliers":           "Virginia",
+  "Alabama Crimson Tide":         "Alabama",
+  "Texas Tech Red Raiders":       "Texas Tech",
+  "Tennessee Volunteers":         "Tennessee",
+  "Kentucky Wildcats":            "Kentucky",
+  "Georgia Bulldogs":             "Georgia",
+  "Saint Louis Billikens":        "St Louis",
+  "Santa Clara Broncos":          "Santa Clara",
+  "Miami (OH) RedHawks":          "Miami OH",
+  "Akron Zips":                   "Akron",
+  "Hofstra Pride":                "Hofstra",
+  "Wright State Raiders":         "Wright St",
+  "Tennessee State Tigers":       "Tennessee St",
+  "Howard Bison":                 "Howard",
+  "Florida Gators":               "Florida",
+  "Houston Cougars":              "Houston",
+  "Illinois Fighting Illini":     "Illinois",
+  "Nebraska Cornhuskers":         "Nebraska",
+  "Vanderbilt Commodores":        "Vanderbilt",
+  "North Carolina Tar Heels":     "North Carolina",
+  "Saint Mary's Gaels":           "St Mary's CA",
+  "Clemson Tigers":               "Clemson",
+  "Iowa Hawkeyes":                "Iowa",
+  "Texas A&M Aggies":             "Texas A&M",
+  "VCU Rams":                     "VCU",
+  "McNeese Cowboys":              "McNeese St",
+  "Troy Trojans":                 "Troy",
+  "Pennsylvania Quakers":         "Penn",
+  "Idaho Vandals":                "Idaho",
+  "Prairie View A&M Panthers":    "Prairie View",
+  "Arizona Wildcats":             "Arizona",
+  "Purdue Boilermakers":          "Purdue",
+  "Gonzaga Bulldogs":             "Gonzaga",
+  "Arkansas Razorbacks":          "Arkansas",
+  "Wisconsin Badgers":            "Wisconsin",
+  "BYU Cougars":                  "BYU",
+  "Miami Hurricanes":             "Miami FL",
+  "Villanova Wildcats":           "Villanova",
+  "Utah State Aggies":            "Utah St",
+  "Missouri Tigers":              "Missouri",
+  "Texas Longhorns":              "Texas",
+  "High Point Panthers":          "High Point",
+  "Hawai'i Rainbow Warriors":     "Hawaii",
+  "Kennesaw State Owls":          "Kennesaw",
+  "Queens Royals":                "Queens NC",
+  "LIU Sharks":                   "LIU Brooklyn",
+  "NC State Wolfpack":            "NC State",
+};
+
 interface ESPNGame {
   id: string;
   status: {
     type: {
       completed: boolean;
-      state: string;       // "pre" | "in" | "post"
+      state: string;
       description: string;
     };
   };
@@ -40,19 +105,24 @@ interface ESPNGame {
   }>;
 }
 
-// Try to match an ESPN game to one of our game_nodes by team names
+function resolveESPN(espnDisplayName: string, dbNameToId: Map<string, number>): number | undefined {
+  const dbName = ESPN_TO_DB[espnDisplayName];
+  if (dbName) return dbNameToId.get(dbName);
+  return undefined;
+}
+
 function matchToNode(
   comp: ESPNGame["competitions"][0],
   nodes: any[],
-  teamByName: Map<string, number>,
+  dbNameToId: Map<string, number>,
   recorded: Set<number>,
   skipRecorded: boolean,
 ): { node: any; teamAId: number; teamBId: number } | null {
   const teams = comp.competitors;
   if (teams.length < 2) return null;
 
-  const id1 = teamByName.get(teams[0].team.displayName.toLowerCase());
-  const id2 = teamByName.get(teams[1].team.displayName.toLowerCase());
+  const id1 = resolveESPN(teams[0].team.displayName, dbNameToId);
+  const id2 = resolveESPN(teams[1].team.displayName, dbNameToId);
   if (!id1 || !id2) return null;
 
   for (const node of nodes) {
@@ -65,6 +135,17 @@ function matchToNode(
   return null;
 }
 
+function parseRoundFromNotes(notes: { type: string; headline: string }[]): string {
+  const headline = notes?.[0]?.headline ?? "";
+  const parts = headline.split(" - ");
+  const roundPart = parts[parts.length - 1]?.trim() ?? "";
+  const espnRoundMap: Record<string, string> = {
+    "1st Round": "First Round",
+    "2nd Round": "Second Round",
+  };
+  return espnRoundMap[roundPart] ?? roundPart;
+}
+
 export async function GET(req: NextRequest) {
   const authHeader = req.headers.get("authorization");
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -74,12 +155,10 @@ export async function GET(req: NextRequest) {
   const supabase = getServiceClient();
 
   try {
-    // 1. Fetch ESPN scoreboard
     const res = await fetch(ESPN_URL, { next: { revalidate: 0 } });
     const json = await res.json();
     const events: ESPNGame[] = json.events ?? [];
 
-    // 2. Load existing state
     const { data: existingResults } = await supabase
       .from("game_results")
       .select("game_idx");
@@ -92,31 +171,45 @@ export async function GET(req: NextRequest) {
     const { data: teams } = await supabase
       .from("tournament_teams")
       .select("team_id, name, seed");
-    const teamByName = new Map<string, number>(
-      (teams ?? []).map((t: any) => [t.name.toLowerCase(), t.team_id])
+
+    // DB name (lowercase) → team_id
+    const dbNameToId = new Map<string, number>(
+      (teams ?? []).map((t: any) => [t.name, t.team_id])
     );
 
     let newResults = 0;
     const liveGameIdxs: number[] = [];
+    const debugLog: string[] = [];
 
     for (const event of events) {
       const comp = event.competitions?.[0];
       if (!comp) continue;
 
-      // ── COMPLETED GAMES: score brackets ──
+      const espnTeam1 = comp.competitors?.[0]?.team?.displayName ?? "?";
+      const espnTeam2 = comp.competitors?.[1]?.team?.displayName ?? "?";
+
       if (event.status.type.completed) {
         const winnerObj = comp.competitors?.find((c) => c.winner);
-        if (!winnerObj) continue;
+        if (!winnerObj) {
+          debugLog.push(`SKIP ${espnTeam1} vs ${espnTeam2}: no winner`);
+          continue;
+        }
 
         const winnerName = winnerObj.team.displayName;
-        const winnerId = teamByName.get(winnerName.toLowerCase());
-        if (!winnerId) continue;
+        const winnerId = resolveESPN(winnerName, dbNameToId);
+        if (!winnerId) {
+          debugLog.push(`SKIP ${winnerName}: not in ESPN_TO_DB map`);
+          continue;
+        }
 
-        const match = matchToNode(comp, nodes ?? [], teamByName, recorded, true);
-        if (!match) continue;
+        const match = matchToNode(comp, nodes ?? [], dbNameToId, recorded, true);
+        if (!match) {
+          debugLog.push(`SKIP ${espnTeam1} vs ${espnTeam2}: no node match or already recorded`);
+          continue;
+        }
 
-        const roundName = comp.notes?.[0]?.headline ?? "";
-        const round = ROUND_MAP[roundName] ?? match.node.round;
+        const roundStr = parseRoundFromNotes(comp.notes ?? []);
+        const round = ROUND_MAP[roundStr] ?? match.node.round;
         const winnerSeed = (teams ?? []).find((t: any) => t.team_id === winnerId)?.seed ?? 0;
 
         const { error: insertErr } = await supabase.from("game_results").insert({
@@ -128,7 +221,7 @@ export async function GET(req: NextRequest) {
         });
 
         if (insertErr) {
-          console.error(`Failed to insert game_idx ${match.node.game_idx}:`, insertErr.message);
+          debugLog.push(`ERROR game_idx ${match.node.game_idx}: ${insertErr.message}`);
           continue;
         }
 
@@ -141,25 +234,26 @@ export async function GET(req: NextRequest) {
 
         recorded.add(match.node.game_idx);
         newResults++;
+        debugLog.push(`SCORED game_idx ${match.node.game_idx}: ${winnerName} (${roundPts} pts)`);
         continue;
       }
 
-      // ── IN-PROGRESS GAMES: track for live UI state ──
       if (event.status.type.state === "in") {
-        const match = matchToNode(comp, nodes ?? [], teamByName, recorded, true);
+        const match = matchToNode(comp, nodes ?? [], dbNameToId, recorded, true);
         if (match) {
           liveGameIdxs.push(match.node.game_idx);
+          debugLog.push(`LIVE game_idx ${match.node.game_idx}: ${espnTeam1} vs ${espnTeam2}`);
+        } else {
+          debugLog.push(`LIVE SKIP ${espnTeam1} vs ${espnTeam2}: no match`);
         }
       }
     }
 
-    // 3. Store live game indices in metadata (replace every run)
     await supabase.from("metadata").upsert({
       key: "live_game_idxs",
       value: JSON.stringify(liveGameIdxs),
     });
 
-    // 4. Update general metadata
     const { count: gamesCompleted } = await supabase
       .from("game_results")
       .select("game_idx", { count: "exact" });
@@ -169,7 +263,6 @@ export async function GET(req: NextRequest) {
       { key: "last_updated", value: new Date().toISOString() },
     ]);
 
-    // 5. Update ranks if we scored new games
     if (newResults > 0) {
       await supabase.rpc("update_ranks");
     }
@@ -179,6 +272,7 @@ export async function GET(req: NextRequest) {
       new_results: newResults,
       live_games: liveGameIdxs.length,
       games_complete: gamesCompleted,
+      debug: debugLog,
     });
   } catch (err: any) {
     console.error("Cron error:", err);
