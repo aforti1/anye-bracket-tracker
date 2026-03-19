@@ -12,10 +12,14 @@ function smartNum(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) {
     const k = n / 1000;
-    return k % 1 === 0 ? `${k}K` : `${parseFloat(k.toFixed(2))}K`;
+    if (k >= 100) return `${Math.round(k)}K`;
+    if (k >= 10) return `${parseFloat((Math.round(k * 10) / 10).toFixed(1))}K`;
+    return `${parseFloat((Math.round(k * 100) / 100).toFixed(2))}K`;
   }
   const m = n / 1_000_000;
-  return m % 1 === 0 ? `${m}M` : `${parseFloat(m.toFixed(2))}M`;
+  if (m >= 100) return `${Math.round(m)}M`;
+  if (m >= 10) return `${parseFloat((Math.round(m * 10) / 10).toFixed(1))}M`;
+  return `${parseFloat((Math.round(m * 100) / 100).toFixed(2))}M`;
 }
 
 const COLUMNS = [
@@ -28,6 +32,9 @@ const COLUMNS = [
   { key: "perfect_streak",  label: "Perfect Streak",  sortable: true },
   { key: "upset_count",     label: "Upsets",           sortable: true },
 ];
+
+const PER_PAGE = 50;
+const CACHE_KEY = "leaderboard_cache";
 
 function LeaderboardInner({ summary: serverSummary, champions: serverChampions }: Props) {
   const router = useRouter();
@@ -54,11 +61,17 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
 
   const [brackets, setBrackets]       = useState<BracketRow[]>([]);
   const [loading, setLoading]         = useState(true);
+  const [filterLoading, setFilterLoading] = useState(false); // heavy filter scan in progress
   const [totalPages, setTotalPages]   = useState(1);
   const [total, setTotal]             = useState(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // Cached filtered IDs — the expensive scan result, reused for pagination
+  const [filteredIds, setFilteredIds] = useState<number[] | null>(null);
+  const filterKeyRef = useRef("");
+
   const isInitialMount = useRef(true);
+  const fetchController = useRef<AbortController | null>(null);
 
   // When pick filters active, disable champion dropdown
   useEffect(() => {
@@ -80,35 +93,186 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
     window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
   }, [page, sort, order, champFilter, minUpsets, maxUpsets, pickFilters, pathname]);
 
-  const fetchBrackets = useCallback(async () => {
-    setLoading(true);
-    const params = new URLSearchParams({
-      page: String(page), per_page: "50", sort, order,
-      ...(champFilter && pickFilters.length === 0 && { champion_id: champFilter }),
-      ...(minUpsets && { min_upsets: minUpsets }),
-      ...(maxUpsets && { max_upsets: maxUpsets }),
+  // Build a key that uniquely identifies the current filter combination
+  const buildFilterKey = useCallback(() => {
+    return JSON.stringify({
+      champ: champFilter, minUp: minUpsets, maxUp: maxUpsets,
+      picks: pickFilters,
     });
-    if (pickFilters.length > 0) params.set("pick_filters", JSON.stringify(pickFilters));
-    const res = await fetch(`/api/brackets?${params}`);
-    const data = await res.json();
-    setBrackets(data.brackets ?? []);
-    setTotalPages(data.total_pages ?? 1);
-    setTotal(data.total ?? 0);
-    setLoading(false);
-  }, [page, sort, order, champFilter, minUpsets, maxUpsets, pickFilters]);
+  }, [champFilter, minUpsets, maxUpsets, pickFilters]);
 
-  useEffect(() => { fetchBrackets(); }, [fetchBrackets]);
+  const hasActiveFilters = !!(champFilter || minUpsets || maxUpsets || pickFilters.length > 0);
+
+  // ── FETCH: filtered path (scan IDs once, then paginate by ID) ──
+  const fetchFilteredPage = useCallback(async (ids: number[], pg: number) => {
+    const start = (pg - 1) * PER_PAGE;
+    const pageIds = ids.slice(start, start + PER_PAGE);
+    if (pageIds.length === 0) {
+      setBrackets([]); return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetch("/api/brackets/by-ids", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: pageIds }),
+      });
+      const data = await res.json();
+      // Preserve the order from pageIds
+      setBrackets(data.brackets ?? []);
+      // Cache for back-nav
+      try {
+        sessionStorage.setItem(CACHE_KEY, JSON.stringify({
+          filterKey: buildFilterKey(), ids, page: pg,
+          brackets: data.brackets ?? [], total: ids.length, ts: Date.now(),
+        }));
+      } catch {}
+    } catch (err: any) {
+      if (err.name !== "AbortError") console.error("Fetch error:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [buildFilterKey]);
+
+  // ── MAIN EFFECT: runs on any state change ──
+  useEffect(() => {
+    const currentFilterKey = buildFilterKey();
+
+    // ── NO FILTERS: use normal indexed Supabase query ──
+    if (!hasActiveFilters) {
+      setFilteredIds(null);
+      filterKeyRef.current = "";
+
+      // Check sessionStorage for back-nav
+      try {
+        const cached = sessionStorage.getItem(CACHE_KEY);
+        if (cached) {
+          const c = JSON.parse(cached);
+          if (!c.filterKey && c.page === page && c.sort === sort && c.order === order && Date.now() - c.ts < 60000) {
+            setBrackets(c.brackets ?? []);
+            setTotalPages(c.totalPages ?? 1);
+            setTotal(c.total ?? 0);
+            setLoading(false);
+            return;
+          }
+        }
+      } catch {}
+
+      if (fetchController.current) fetchController.current.abort();
+      const controller = new AbortController();
+      fetchController.current = controller;
+
+      setLoading(true);
+      const params = new URLSearchParams({
+        page: String(page), per_page: String(PER_PAGE), sort, order,
+      });
+      fetch(`/api/brackets?${params}`, { signal: controller.signal })
+        .then(r => r.json())
+        .then(data => {
+          if (data.error) {
+            console.error("Brackets API error:", data.error);
+            setBrackets([]); setTotalPages(1); setTotal(0);
+          } else {
+            setBrackets(data.brackets ?? []);
+            setTotalPages(data.total_pages ?? 1);
+            setTotal(data.total ?? 0);
+            try {
+              sessionStorage.setItem(CACHE_KEY, JSON.stringify({
+                page, sort, order, brackets: data.brackets,
+                totalPages: data.total_pages, total: data.total, ts: Date.now(),
+              }));
+            } catch {}
+          }
+          setLoading(false);
+        })
+        .catch(err => { if (err.name !== "AbortError") setLoading(false); });
+      return;
+    }
+
+    // ── FILTERS ACTIVE ──
+
+    // If we already have cached IDs for this exact filter combo, just paginate
+    if (filteredIds && filterKeyRef.current === currentFilterKey) {
+      setTotal(filteredIds.length);
+      setTotalPages(Math.ceil(filteredIds.length / PER_PAGE));
+      fetchFilteredPage(filteredIds, page);
+      return;
+    }
+
+    // Check sessionStorage for cached IDs from back-nav
+    try {
+      const cached = sessionStorage.getItem(CACHE_KEY);
+      if (cached) {
+        const c = JSON.parse(cached);
+        if (c.filterKey === currentFilterKey && c.ids && Date.now() - c.ts < 120000) {
+          const ids = c.ids as number[];
+          setFilteredIds(ids);
+          filterKeyRef.current = currentFilterKey;
+          setTotal(ids.length);
+          setTotalPages(Math.ceil(ids.length / PER_PAGE));
+          // If same page, use cached brackets directly
+          if (c.page === page && c.brackets) {
+            setBrackets(c.brackets);
+            setLoading(false);
+            return;
+          }
+          fetchFilteredPage(ids, page);
+          return;
+        }
+      }
+    } catch {}
+
+    // New filter combo — do the expensive scan ONCE
+    setFilterLoading(true);
+    setLoading(true);
+
+    const params = new URLSearchParams();
+    if (champFilter && pickFilters.length === 0) params.set("champion_id", champFilter);
+    if (minUpsets) params.set("min_upsets", minUpsets);
+    if (maxUpsets) params.set("max_upsets", maxUpsets);
+    if (pickFilters.length > 0) params.set("pick_filters", JSON.stringify(pickFilters));
+
+    fetch(`/api/brackets/filter-ids?${params}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          console.error("Filter IDs error:", data.error);
+          setBrackets([]); setTotal(0); setTotalPages(1);
+          setLoading(false); setFilterLoading(false);
+          return;
+        }
+        const ids = data.ids as number[];
+        setFilteredIds(ids);
+        filterKeyRef.current = currentFilterKey;
+        setTotal(ids.length);
+        setTotalPages(Math.ceil(ids.length / PER_PAGE));
+        setFilterLoading(false);
+
+        if (ids.length === 0) {
+          setBrackets([]); setLoading(false);
+          return;
+        }
+        fetchFilteredPage(ids, page);
+      })
+      .catch(err => {
+        console.error("Filter error:", err);
+        setLoading(false); setFilterLoading(false);
+      });
+  }, [page, sort, order, champFilter, minUpsets, maxUpsets, pickFilters, hasActiveFilters, buildFilterKey, filteredIds, fetchFilteredPage]);
 
   // Helper: apply a filter change + reset sort to rank asc + page 1
   const applyFilterChange = (updates: {
     champ?: string; minUp?: string; maxUp?: string; picks?: typeof pickFilters;
   }) => {
+    // Clear cached IDs so the next effect does a fresh scan
+    setFilteredIds(null);
+    filterKeyRef.current = "";
+
     if (updates.champ !== undefined) setChampFilter(updates.champ);
     if (updates.minUp !== undefined) setMinUpsets(updates.minUp);
     if (updates.maxUp !== undefined) setMaxUpsets(updates.maxUp);
     if (updates.picks !== undefined) setPickFilters(updates.picks);
 
-    // Check if any filter will be active after this change
     const willHaveChamp = updates.champ !== undefined ? updates.champ : champFilter;
     const willHaveMinUp = updates.minUp !== undefined ? updates.minUp : minUpsets;
     const willHaveMaxUp = updates.maxUp !== undefined ? updates.maxUp : maxUpsets;
@@ -123,11 +287,20 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
   };
 
   const clearAllFilters = () => {
+    setFilteredIds(null);
+    filterKeyRef.current = "";
     setChampFilter(""); setMinUpsets(""); setMaxUpsets(""); setPickFilters([]);
     setSort("total_points"); setOrder("desc"); setPage(1);
+    try { sessionStorage.removeItem(CACHE_KEY); } catch {}
   };
 
   const toggleSort = (key: string) => {
+    // For filtered results, sorting requires re-scan (IDs are sorted by points DESC)
+    // Clear cached IDs to force re-fetch
+    if (hasActiveFilters) {
+      setFilteredIds(null);
+      filterKeyRef.current = "";
+    }
     if (sort === key) setOrder(o => o === "desc" ? "asc" : "desc");
     else { setSort(key); setOrder(key === "rank" ? "asc" : "desc"); }
     setPage(1);
@@ -174,7 +347,34 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
         onApply={(f) => { applyFilterChange({ picks: f }); setShowAdvanced(false); }}
         onClose={() => setShowAdvanced(false)} />}
 
-      <div className="card" style={{ overflow: "hidden" }}>
+      {/* Full-viewport loading overlay for expensive filter scans */}
+      {filterLoading && (
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 50,
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          background: "rgba(10, 10, 11, 0.88)", backdropFilter: "blur(4px)",
+        }}>
+          <div style={{
+            width: 44, height: 44, border: "3px solid var(--border)",
+            borderTopColor: "var(--accent)", borderRadius: "50%",
+            animation: "spin 0.8s linear infinite",
+          }} />
+          <span style={{
+            marginTop: 20, fontFamily: "var(--font-mono)", fontSize: 16, fontWeight: 500,
+            color: "#ffffff", letterSpacing: "0.04em",
+          }}>
+            Filtering {smartNum(parseInt(String(summary.total_brackets)))} brackets...
+          </span>
+          <span style={{
+            marginTop: 8, fontFamily: "var(--font-mono)", fontSize: 13,
+            color: "var(--text-secondary)",
+          }}>
+            This may take a few seconds
+          </span>
+        </div>
+      )}
+
+      <div className="card" style={{ overflow: "hidden", minHeight: "calc(100vh - 280px)" }}>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
@@ -184,7 +384,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
             </thead>
             <tbody>
               {loading ? (
-                Array.from({ length: 10 }).map((_, i) => (
+                Array.from({ length: 20 }).map((_, i) => (
                   <tr key={`skel-${i}`} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
                     {Array.from({ length: COLUMNS.length }).map((_, j) => <td key={j} style={{ padding: "14px 16px" }}><div style={{ height: 14, borderRadius: 3, background: "var(--bg-elevated)", width: j === 1 ? 80 : 50 }} /></td>)}
                   </tr>
@@ -220,12 +420,18 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
           </div>
         )}
       </div>
+
+      <style jsx global>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
 
 export default function LeaderboardClient(props: Props) {
-  return <Suspense fallback={<div className="card animate-pulse" style={{ height: 400 }} />}><LeaderboardInner {...props} /></Suspense>;
+  return <Suspense fallback={<div className="card animate-pulse" style={{ minHeight: "calc(100vh - 280px)" }} />}><LeaderboardInner {...props} /></Suspense>;
 }
 
 function Th({ children, sortable, active, asc, onClick }: { children: React.ReactNode; sortable?: boolean; active?: boolean; asc?: boolean; onClick?: () => void; }) {

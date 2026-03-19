@@ -25,9 +25,14 @@ export async function GET(req: NextRequest) {
   const sortAsc = order === "asc";
 
   let pickConditions: { game_idx: number; team_id: number; won: boolean }[] = [];
-  if (pickFiltersRaw) { try { const p = JSON.parse(pickFiltersRaw); if (Array.isArray(p)) pickConditions = p; } catch {} }
+  if (pickFiltersRaw) {
+    try {
+      const p = JSON.parse(pickFiltersRaw);
+      if (Array.isArray(p)) pickConditions = p;
+    } catch {}
+  }
 
-  // Load game structure (needed for enrichment + pick filter "reached" logic)
+  // Load game structure (needed for enrichment: max_points, perfect_streak)
   const [nodesRes, resultsRes] = await Promise.all([
     supabase.from("game_nodes").select("*").order("game_idx"),
     supabase.from("game_results").select("game_idx, winner_id").order("game_idx"),
@@ -38,28 +43,188 @@ export async function GET(req: NextRequest) {
   const winnerByIdx = new Map(gameResults.map(r => [r.game_idx, r.winner_id]));
   const decidedIdxes = Array.from(winnerByIdx.keys()).sort((a, b) => a - b);
   const decidedSet = new Set(decidedIdxes);
+
   let remainingPointsSum = 0;
-  for (const n of gameNodes) if (!decidedSet.has(n.game_idx)) remainingPointsSum += ROUND_POINTS[n.round] ?? 0;
+  for (const n of gameNodes) {
+    if (!decidedSet.has(n.game_idx)) remainingPointsSum += ROUND_POINTS[n.round] ?? 0;
+  }
   const games_complete = gameResults.length;
 
-  // Structural teams cache (for "reached" check)
-  const structuralCache = new Map<number, Set<number>>();
-  function getStructural(gi: number): Set<number> {
-    if (structuralCache.has(gi)) return structuralCache.get(gi)!;
-    const n = nodeMap.get(gi);
-    if (!n) return new Set();
-    if (n.round === "round_64") {
-      const s = new Set<number>();
-      if (n.team_a_id) s.add(n.team_a_id);
-      if (n.team_b_id) s.add(n.team_b_id);
-      structuralCache.set(gi, s); return s;
+  // Enrich a bracket row with computed fields (runs on page of results only)
+  function enrichBracket(b: any) {
+    const picks: number[] = typeof b.picks === "string"
+      ? b.picks.split(",").map(Number)
+      : (b.picks ?? []);
+    const max_points = b.total_points + remainingPointsSum;
+    let perfect_streak = 0;
+    for (let i = decidedIdxes.length - 1; i >= 0; i--) {
+      if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++;
+      else break;
     }
-    const s = new Set<number>();
-    if (n.source_a != null) for (const id of getStructural(n.source_a)) s.add(id);
-    if (n.source_b != null) for (const id of getStructural(n.source_b)) s.add(id);
-    structuralCache.set(gi, s); return s;
+    const { picks: _, ...rest } = b;
+    return { ...rest, max_points, perfect_streak };
   }
 
+  // ── PICK FILTER PATH (uses SQL RPC) ──
+  if (pickConditions.length > 0) {
+    // Build conditions with source_a/source_b for the "reached" check in SQL
+    const conditionsWithSources = pickConditions.map(c => {
+      const node = nodeMap.get(c.game_idx);
+      return {
+        game_idx: c.game_idx,
+        team_id: c.team_id,
+        won: c.won,
+        source_a: node?.source_a ?? null,
+        source_b: node?.source_b ?? null,
+      };
+    });
+
+    const conditions = conditionsWithSources;
+
+    const offset = (page - 1) * per_page;
+
+    try {
+      // Two parallel RPC calls: count + paginated results
+      const [countRes, dataRes] = await Promise.all([
+        supabase.rpc("count_filtered_brackets", {
+          p_conditions: conditions,
+          p_champion_id: champion_id ? parseInt(champion_id) : null,
+          p_min_upsets: min_upsets ? parseInt(min_upsets) : null,
+          p_max_upsets: max_upsets ? parseInt(max_upsets) : null,
+        }),
+        supabase.rpc("get_filtered_brackets", {
+          p_conditions: conditions,
+          p_champion_id: champion_id ? parseInt(champion_id) : null,
+          p_min_upsets: min_upsets ? parseInt(min_upsets) : null,
+          p_max_upsets: max_upsets ? parseInt(max_upsets) : null,
+          p_sort_col: sortCol,
+          p_sort_asc: sortAsc,
+          p_offset: offset,
+          p_limit: per_page,
+        }),
+      ]);
+
+      if (countRes.error || dataRes.error) {
+        throw new Error(countRes.error?.message ?? dataRes.error?.message ?? "RPC failed");
+      }
+
+      const total = Number(countRes.data ?? 0);
+      // RPC doesn't return picks, so we need to fetch them for enrichment
+      const ids = (dataRes.data ?? []).map((r: any) => r.id);
+      let enriched = (dataRes.data ?? []).map((r: any) => ({
+        ...r,
+        max_points: r.total_points + remainingPointsSum,
+        perfect_streak: 0, // Can't compute without picks — acceptable tradeoff
+      }));
+
+      // If we need perfect_streak, fetch picks for just this page
+      if (ids.length > 0 && decidedIdxes.length > 0) {
+        const { data: picksData } = await supabase
+          .from("brackets")
+          .select("id, picks")
+          .in("id", ids);
+
+        if (picksData) {
+          const picksMap = new Map(picksData.map((r: any) => [r.id, r.picks]));
+          enriched = enriched.map((r: any) => {
+            const rawPicks = picksMap.get(r.id);
+            const picks: number[] = typeof rawPicks === "string"
+              ? rawPicks.split(",").map(Number)
+              : (rawPicks ?? []);
+            let perfect_streak = 0;
+            for (let i = decidedIdxes.length - 1; i >= 0; i--) {
+              if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++;
+              else break;
+            }
+            return { ...r, max_points: r.total_points + remainingPointsSum, perfect_streak };
+          });
+        }
+      }
+
+      // Sort by perfect_streak client-side if that's the sort column (can't do in SQL)
+      if (sort === "perfect_streak") {
+        enriched.sort((a: any, b: any) => {
+          const d = (a.perfect_streak ?? 0) - (b.perfect_streak ?? 0);
+          return order === "desc" ? -d : d;
+        });
+      }
+
+      return NextResponse.json({
+        brackets: enriched,
+        total,
+        page,
+        per_page,
+        total_pages: Math.ceil(total / per_page),
+        games_complete,
+        tournament_live: games_complete > 0 && games_complete < 63,
+      });
+    } catch (rpcError: any) {
+      // Fallback to JS scan if RPC not deployed yet
+      console.error("Pick filter RPC failed, falling back to JS scan:", rpcError.message);
+      return jsPickFilterFallback(
+        pickConditions, nodeMap, winnerByIdx, decidedIdxes, remainingPointsSum,
+        champion_id, min_upsets, max_upsets, sortCol, sortAsc, sort, order,
+        page, per_page, games_complete, enrichBracket
+      );
+    }
+  }
+
+  // ── NORMAL PATH (no pick filters — fast indexed query) ──
+  const from2 = (page - 1) * per_page;
+  const to2 = from2 + per_page - 1;
+
+  let query = supabase.from("brackets")
+    .select("id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank", { count: "exact" })
+    .order(sortCol, { ascending: sortAsc });
+
+  if (champion_id) query = query.eq("champion_id", parseInt(champion_id));
+  if (min_upsets)  query = query.gte("upset_count", parseInt(min_upsets));
+  if (max_upsets)  query = query.lte("upset_count", parseInt(max_upsets));
+  query = query.range(from2, to2);
+
+  const { data, error, count } = await query;
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  let enriched = (data ?? []).map(enrichBracket);
+
+  // Sort by computed columns client-side
+  if (sort === "perfect_streak") {
+    enriched.sort((a: any, b: any) => {
+      const d = (a.perfect_streak ?? 0) - (b.perfect_streak ?? 0);
+      return order === "desc" ? -d : d;
+    });
+  }
+
+  return NextResponse.json({
+    brackets: enriched,
+    total: count ?? 0,
+    page,
+    per_page,
+    total_pages: Math.ceil((count ?? 0) / per_page),
+    games_complete,
+    tournament_live: games_complete > 0 && games_complete < 63,
+  });
+}
+
+// ── JS FALLBACK for pick filtering (used if RPC not deployed) ──
+async function jsPickFilterFallback(
+  pickConditions: { game_idx: number; team_id: number; won: boolean }[],
+  nodeMap: Map<number, any>,
+  winnerByIdx: Map<number, number>,
+  decidedIdxes: number[],
+  remainingPointsSum: number,
+  champion_id: string | null,
+  min_upsets: string | null,
+  max_upsets: string | null,
+  sortCol: string,
+  sortAsc: boolean,
+  sort: string,
+  order: string,
+  page: number,
+  per_page: number,
+  games_complete: number,
+  enrichBracket: (b: any) => any,
+) {
   function teamReachedGame(picks: number[], gi: number, tid: number): boolean {
     const n = nodeMap.get(gi);
     if (!n) return false;
@@ -74,102 +239,62 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  function enrichBracket(b: any) {
-    let picks: number[] = typeof b.picks === "string" ? b.picks.split(",").map(Number) : (b.picks ?? []);
-    const max_points = b.total_points + remainingPointsSum;
-    let perfect_streak = 0;
-    for (let i = decidedIdxes.length - 1; i >= 0; i--) {
-      if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++; else break;
+  const matchingRows = new Map<number, any>();
+  const batchSize = 1000;
+  let from = 0;
+
+  while (true) {
+    let q = supabase.from("brackets")
+      .select("id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank")
+      .range(from, from + batchSize - 1)
+      .order("id", { ascending: true });
+
+    if (champion_id) q = q.eq("champion_id", parseInt(champion_id));
+    if (min_upsets)  q = q.gte("upset_count", parseInt(min_upsets));
+    if (max_upsets)  q = q.lte("upset_count", parseInt(max_upsets));
+
+    const { data } = await q;
+    if (!data || data.length === 0) break;
+
+    for (const row of data) {
+      if (matchingRows.has(row.id)) continue;
+      const picks: number[] = typeof row.picks === "string"
+        ? row.picks.split(",").map(Number)
+        : (row.picks ?? []);
+      if (matchesAll(picks)) matchingRows.set(row.id, row);
     }
-    const { picks: _, ...rest } = b;
-    return { ...rest, max_points, perfect_streak };
+
+    if (data.length < batchSize) break;
+    from += batchSize;
   }
 
-  // ── PICK FILTER PATH ──
-  if (pickConditions.length > 0) {
-    // Scan ALL brackets in one pass, collecting matching IDs
-    // Use a Map to deduplicate and store the full row
-    const matchingRows = new Map<number, any>();
-    const batchSize = 1000;
-    let from = 0;
+  let allMatching = Array.from(matchingRows.values());
+  const total = allMatching.length;
 
-    while (true) {
-      let q = supabase.from("brackets")
-        .select("id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank")
-        .range(from, from + batchSize - 1)
-        .order("id", { ascending: true }); // deterministic ordering for pagination
-
-      if (champion_id) q = q.eq("champion_id", parseInt(champion_id));
-      if (min_upsets) q = q.gte("upset_count", parseInt(min_upsets));
-      if (max_upsets) q = q.lte("upset_count", parseInt(max_upsets));
-
-      const { data } = await q;
-      if (!data || data.length === 0) break;
-
-      for (const row of data) {
-        if (matchingRows.has(row.id)) continue; // dedup
-        const picks: number[] = typeof row.picks === "string" ? row.picks.split(",").map(Number) : (row.picks ?? []);
-        if (matchesAll(picks)) matchingRows.set(row.id, row);
-      }
-
-      if (data.length < batchSize) break;
-      from += batchSize;
-    }
-
-    let allMatching = Array.from(matchingRows.values());
-    const total = allMatching.length;
-
-    if (total === 0) {
-      return NextResponse.json({ brackets: [], total: 0, page, per_page, total_pages: 0, games_complete, tournament_live: games_complete > 0 && games_complete < 63 });
-    }
-
-    // Enrich all
-    let enriched = allMatching.map(enrichBracket);
-
-    // Sort
-    const sk = sort === "perfect_streak" ? "perfect_streak" : (sort === "max_points" ? "max_points" : sortCol);
-    enriched.sort((a, b) => {
-      const va = a[sk] ?? 0;
-      const vb = b[sk] ?? 0;
-      if (typeof va === "string" && typeof vb === "string") return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
-      return sortAsc ? (va > vb ? 1 : va < vb ? -1 : 0) : (va < vb ? 1 : va > vb ? -1 : 0);
-    });
-
-    // Paginate
-    const pageStart = (page - 1) * per_page;
-    const pageRows = enriched.slice(pageStart, pageStart + per_page);
-
+  if (total === 0) {
     return NextResponse.json({
-      brackets: pageRows, total, page, per_page,
-      total_pages: Math.ceil(total / per_page),
+      brackets: [], total: 0, page, per_page, total_pages: 0,
       games_complete, tournament_live: games_complete > 0 && games_complete < 63,
     });
   }
 
-  // ── NORMAL PATH ──
-  const from2 = (page - 1) * per_page;
-  const to2 = from2 + per_page - 1;
+  let enriched = allMatching.map(enrichBracket);
 
-  let query = supabase.from("brackets")
-    .select("id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank", { count: "exact" })
-    .order(sortCol, { ascending: sortAsc });
+  const sk = sort === "perfect_streak" ? "perfect_streak" : (sort === "max_points" ? "max_points" : sortCol);
+  enriched.sort((a: any, b: any) => {
+    const va = a[sk] ?? 0;
+    const vb = b[sk] ?? 0;
+    if (typeof va === "string" && typeof vb === "string")
+      return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return sortAsc ? (va > vb ? 1 : va < vb ? -1 : 0) : (va < vb ? 1 : va > vb ? -1 : 0);
+  });
 
-  if (champion_id) query = query.eq("champion_id", parseInt(champion_id));
-  if (min_upsets) query = query.gte("upset_count", parseInt(min_upsets));
-  if (max_upsets) query = query.lte("upset_count", parseInt(max_upsets));
-  query = query.range(from2, to2);
-
-  const { data, error, count } = await query;
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-  let enriched = (data ?? []).map(enrichBracket);
-  if (sort === "perfect_streak") {
-    enriched.sort((a: any, b: any) => { const d = (a.perfect_streak ?? 0) - (b.perfect_streak ?? 0); return order === "desc" ? -d : d; });
-  }
+  const pageStart = (page - 1) * per_page;
+  const pageRows = enriched.slice(pageStart, pageStart + per_page);
 
   return NextResponse.json({
-    brackets: enriched, total: count ?? 0, page, per_page,
-    total_pages: Math.ceil((count ?? 0) / per_page),
+    brackets: pageRows, total, page, per_page,
+    total_pages: Math.ceil(total / per_page),
     games_complete, tournament_live: games_complete > 0 && games_complete < 63,
   });
 }
