@@ -27,12 +27,10 @@ export async function GET(
   }
   const bracket = bracketRes.data;
 
-  // Rank
-  const { count: rankCount } = await supabase
-    .from("brackets")
-    .select("id", { count: "exact", head: true })
-    .gt("total_points", bracket.total_points);
-  const rank = (rankCount ?? 0) + 1;
+  // Use the stored rank from the DB — this matches the leaderboard
+  // which reads the same column. Both are set by update_ranks() using
+  // RANK() OVER (ORDER BY total_points DESC, correct_picks DESC).
+  const rank = bracket.rank ?? null;
 
   // Lookup maps
   const teamMap = new Map<number, TournamentTeam>(
@@ -62,8 +60,6 @@ export async function GET(
       if (correct) points = ROUND_POINTS[node.round as Round] ?? 0;
     }
 
-    // R64: use team_a_id/team_b_id stored in game_nodes
-    // Later rounds: resolve from picks of source games
     let team_a: TournamentTeam | null = null;
     let team_b: TournamentTeam | null = null;
 

@@ -58,19 +58,21 @@ export interface GameResult {
 
 // One row from the brackets table
 export interface BracketRow {
-  id:            number;
-  bracket_hash:  string;
-  picks:         number[];   // length 63 — picks[i] = predicted winner team_id for game_idx i
-  champion_id:   number | null;
-  champion_name: string | null;
-  champion_seed: number | null;
-  log_prob:      number | null;
-  upset_count:   number;
-  total_points:  number;
-  correct_picks: number;
-  games_decided: number;
-  accuracy:      number;
-  rank:          number | null;
+  id:             number;
+  bracket_hash:   string;
+  picks:          number[];   // length 63 — picks[i] = predicted winner team_id for game_idx i
+  champion_id:    number | null;
+  champion_name:  string | null;
+  champion_seed:  number | null;
+  log_prob:       number | null;
+  upset_count:    number;
+  total_points:   number;
+  correct_picks:  number;
+  games_decided:  number;
+  accuracy:       number;
+  rank:           number | null;
+  max_points:     number | null;      // current pts + potential remaining pts
+  perfect_streak: number | null;      // consecutive correct from most recent game
 }
 
 // Enriched bracket for display (picks resolved to team info)
@@ -103,12 +105,12 @@ export interface LeaderboardResponse {
 
 // Summary stats for the header
 export interface TournamentSummary {
-  total_brackets:   number;
-  games_completed:  number;
-  games_total:      number;
-  top_score:        number;
-  top_bracket_hash: string | null;
-  unique_champions: number;
-  last_updated:     string | null;
+  total_brackets:    number;
+  games_completed:   number;
+  games_total:       number;
+  top_score:         number;
+  top_bracket_hash:  string | null;
+  unique_champions:  number;
+  last_updated:      string | null;
   perfect_remaining: number | null;
 }
