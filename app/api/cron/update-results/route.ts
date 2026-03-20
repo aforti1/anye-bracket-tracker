@@ -202,12 +202,16 @@ export async function GET(req: NextRequest) {
 
     const { data: existingResults } = await supabase
       .from("game_results")
-      .select("game_idx");
+      .select("game_idx, winner_id");
     const recorded = new Set((existingResults ?? []).map((r: any) => r.game_idx));
 
     const { data: nodes } = await supabase
       .from("game_nodes")
       .select("game_idx, round, team_a_id, team_b_id");
+
+    const nodeRoundMap = new Map<number, string>(
+      (nodes ?? []).map((n: any) => [n.game_idx, n.round])
+    );
 
     const { data: teams } = await supabase
       .from("tournament_teams")
@@ -220,6 +224,47 @@ export async function GET(req: NextRequest) {
     let newResults = 0;
     const liveGameIdxs: number[] = [];
     const debugLog: string[] = [];
+
+    // ── RECONCILIATION: catch games inserted but never scored ──
+    // Compare game_results count against games_decided on brackets.
+    // If they don't match, find and score the orphaned games.
+    const { data: sampleBracket } = await supabase
+      .from("brackets")
+      .select("games_decided")
+      .limit(1)
+      .single();
+
+    const gamesDecided = sampleBracket?.games_decided ?? 0;
+    const gamesRecorded = recorded.size;
+
+    if (gamesRecorded > gamesDecided) {
+      // Find which games were actually scored via scoring_log
+      const { data: scoredLog } = await supabase
+        .from("scoring_log")
+        .select("game_idx");
+      const scoredSet = new Set((scoredLog ?? []).map((r: any) => r.game_idx));
+
+      // Score every game_result that's missing from scoring_log
+      const orphaned = (existingResults ?? []).filter(
+        (r: any) => !scoredSet.has(r.game_idx)
+      );
+
+      for (const orphan of orphaned) {
+        const round = nodeRoundMap.get(orphan.game_idx);
+        const roundPts = ROUND_POINTS[round as Round] ?? 0;
+        await supabase.rpc("score_game", {
+          p_game_idx: orphan.game_idx,
+          p_winner_id: orphan.winner_id,
+          p_points: roundPts,
+        });
+        debugLog.push(`RECONCILED game_idx ${orphan.game_idx}: scored ${roundPts} pts (was orphaned)`);
+        newResults++;
+      }
+
+      if (orphaned.length > 0) {
+        debugLog.push(`RECONCILIATION: scored ${orphaned.length} orphaned games`);
+      }
+    }
 
     for (const event of events) {
       const comp = event.competitions?.[0];
