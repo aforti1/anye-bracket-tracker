@@ -4,12 +4,19 @@ import { supabase } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
+const ALLOWED_SORTS = ["bracket_hash","champion_name","total_points","correct_picks","accuracy","log_prob","upset_count","rank"];
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const champion_id    = searchParams.get("champion_id") ?? null;
   const min_upsets     = searchParams.get("min_upsets") ?? null;
   const max_upsets     = searchParams.get("max_upsets") ?? null;
   const pickFiltersRaw = searchParams.get("pick_filters") ?? null;
+  const sort           = searchParams.get("sort") ?? "total_points";
+  const order          = searchParams.get("order") ?? "desc";
+
+  const sortCol = ALLOWED_SORTS.includes(sort) ? sort : "total_points";
+  const sortAsc = order === "asc";
 
   let conditions: any[] | null = null;
   if (pickFiltersRaw) {
@@ -37,12 +44,14 @@ export async function GET(req: NextRequest) {
     } catch {}
   }
 
-  // Call the RPC that returns ALL matching IDs, sorted by total_points DESC
+  // Call the RPC that returns ALL matching IDs, sorted by the requested column
   const { data, error } = await supabase.rpc("get_filtered_bracket_ids", {
     p_conditions: conditions,
     p_champion_id: champion_id ? parseInt(champion_id) : null,
     p_min_upsets: min_upsets ? parseInt(min_upsets) : null,
     p_max_upsets: max_upsets ? parseInt(max_upsets) : null,
+    p_sort_col: sortCol,
+    p_sort_asc: sortAsc,
   }).limit(1000000);
 
   if (error) {

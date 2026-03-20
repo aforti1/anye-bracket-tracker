@@ -73,6 +73,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
   // Cached filtered IDs — the expensive scan result, reused for pagination
   const [filteredIds, setFilteredIds] = useState<number[] | null>(null);
   const filterKeyRef = useRef("");
+  const conditionsKeyRef = useRef("");
 
   const isInitialMount = useRef(true);
   const fetchController = useRef<AbortController | null>(null);
@@ -97,8 +98,16 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
     window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
   }, [page, sort, order, champFilter, minUpsets, maxUpsets, pickFilters, pathname]);
 
-  // Build a key that uniquely identifies the current filter combination
+  // Build a key that uniquely identifies the current filter + sort combination
   const buildFilterKey = useCallback(() => {
+    return JSON.stringify({
+      champ: champFilter, minUp: minUpsets, maxUp: maxUpsets,
+      picks: pickFilters, sort, order,
+    });
+  }, [champFilter, minUpsets, maxUpsets, pickFilters, sort, order]);
+
+  // Conditions-only key (no sort) — used to detect sort-only changes
+  const buildConditionsKey = useCallback(() => {
     return JSON.stringify({
       champ: champFilter, minUp: minUpsets, maxUp: maxUpsets,
       picks: pickFilters,
@@ -122,13 +131,21 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
         body: JSON.stringify({ ids: pageIds }),
       });
       const data = await res.json();
-      // Preserve the order from pageIds
-      setBrackets(data.brackets ?? []);
+      let results = data.brackets ?? [];
+      // Sort by computed columns client-side (these can't be sorted in SQL)
+      if (sort === "max_points" || sort === "perfect_streak") {
+        results.sort((a: any, b: any) => {
+          const va = a[sort] ?? 0;
+          const vb = b[sort] ?? 0;
+          return order === "desc" ? vb - va : va - vb;
+        });
+      }
+      setBrackets(results);
       // Cache for back-nav
       try {
         sessionStorage.setItem(CACHE_KEY, JSON.stringify({
           filterKey: buildFilterKey(), ids, page: pg,
-          brackets: data.brackets ?? [], total: ids.length, ts: Date.now(),
+          brackets: results, total: ids.length, ts: Date.now(),
         }));
       } catch {}
     } catch (err: any) {
@@ -136,16 +153,18 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
     } finally {
       setLoading(false);
     }
-  }, [buildFilterKey]);
+  }, [buildFilterKey, sort, order]);
 
   // ── MAIN EFFECT: runs on any state change ──
   useEffect(() => {
     const currentFilterKey = buildFilterKey();
+    const currentConditionsKey = buildConditionsKey();
 
     // ── NO FILTERS: use normal indexed Supabase query ──
     if (!hasActiveFilters) {
       setFilteredIds(null);
       filterKeyRef.current = "";
+      conditionsKeyRef.current = "";
 
       // Check sessionStorage for back-nav
       try {
@@ -195,7 +214,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
 
     // ── FILTERS ACTIVE ──
 
-    // If we already have cached IDs for this exact filter combo, just paginate
+    // If we already have cached IDs for this exact filter+sort combo, just paginate
     if (filteredIds && filterKeyRef.current === currentFilterKey) {
       setTotal(filteredIds.length);
       setTotalPages(Math.ceil(filteredIds.length / PER_PAGE));
@@ -212,6 +231,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
           const ids = c.ids as number[];
           setFilteredIds(ids);
           filterKeyRef.current = currentFilterKey;
+          conditionsKeyRef.current = currentConditionsKey;
           setTotal(ids.length);
           setTotalPages(Math.ceil(ids.length / PER_PAGE));
           // If same page, use cached brackets directly
@@ -226,8 +246,12 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
       }
     } catch {}
 
-    // New filter combo — do the expensive scan ONCE
-    setFilterLoading(true);
+    // Detect if only sort changed (same filter conditions, different sort)
+    const isSortChangeOnly = conditionsKeyRef.current === currentConditionsKey && conditionsKeyRef.current !== "";
+
+    // New filter combo — fetch sorted IDs
+    // Only show heavy overlay for actual filter changes, not just sort changes
+    if (!isSortChangeOnly) setFilterLoading(true);
     setLoading(true);
 
     const params = new URLSearchParams();
@@ -235,6 +259,8 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
     if (minUpsets) params.set("min_upsets", minUpsets);
     if (maxUpsets) params.set("max_upsets", maxUpsets);
     if (pickFilters.length > 0) params.set("pick_filters", JSON.stringify(pickFilters));
+    params.set("sort", sort);
+    params.set("order", order);
 
     fetch(`/api/brackets/filter-ids?${params}`)
       .then(r => r.json())
@@ -248,6 +274,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
         const ids = data.ids as number[];
         setFilteredIds(ids);
         filterKeyRef.current = currentFilterKey;
+        conditionsKeyRef.current = currentConditionsKey;
         setTotal(ids.length);
         setTotalPages(Math.ceil(ids.length / PER_PAGE));
         setFilterLoading(false);
@@ -262,7 +289,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
         console.error("Filter error:", err);
         setLoading(false); setFilterLoading(false);
       });
-  }, [page, sort, order, champFilter, minUpsets, maxUpsets, pickFilters, hasActiveFilters, buildFilterKey, filteredIds, fetchFilteredPage]);
+  }, [page, sort, order, champFilter, minUpsets, maxUpsets, pickFilters, hasActiveFilters, buildFilterKey, buildConditionsKey, filteredIds, fetchFilteredPage]);
 
   // Helper: apply a filter change + reset sort to rank asc + page 1
   const applyFilterChange = (updates: {
@@ -271,6 +298,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
     // Clear cached IDs so the next effect does a fresh scan
     setFilteredIds(null);
     filterKeyRef.current = "";
+    conditionsKeyRef.current = "";
 
     if (updates.champ !== undefined) setChampFilter(updates.champ);
     if (updates.minUp !== undefined) setMinUpsets(updates.minUp);
@@ -293,6 +321,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
   const clearAllFilters = () => {
     setFilteredIds(null);
     filterKeyRef.current = "";
+    conditionsKeyRef.current = "";
     setChampFilter(""); setMinUpsets(""); setMaxUpsets(""); setPickFilters([]);
     setMinUpsetsInput(""); setMaxUpsetsInput("");
     setSort("total_points"); setOrder("desc"); setPage(1);
@@ -300,8 +329,9 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
   };
 
   const toggleSort = (key: string) => {
-    // For filtered results, sorting requires re-scan (IDs are sorted by points DESC)
-    // Clear cached IDs to force re-fetch
+    // For filtered results, clear cached IDs to force re-fetch with new sort order.
+    // NOTE: conditionsKeyRef is intentionally NOT cleared — this lets the effect
+    // detect it's a sort-only change and skip the heavy "Filtering..." overlay.
     if (hasActiveFilters) {
       setFilteredIds(null);
       filterKeyRef.current = "";
