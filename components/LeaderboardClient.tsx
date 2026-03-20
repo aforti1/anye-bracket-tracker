@@ -28,7 +28,7 @@ const COLUMNS = [
   { key: "bracket_hash",    label: "Bracket ID",      sortable: true },
   { key: "champion_name",   label: "Champion",        sortable: true },
   { key: "total_points",    label: "Points",          sortable: true },
-  { key: "max_points",      label: "Max Points",      sortable: false },
+  { key: "max_points",      label: "Max Points",      sortable: true },
   { key: "correct_picks",   label: "Correct",         sortable: true },
   { key: "perfect_streak",  label: "Perfect Streak",  sortable: true },
   { key: "upset_count",     label: "Upsets",           sortable: true },

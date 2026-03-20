@@ -146,6 +146,47 @@ function parseRoundFromNotes(notes: { type: string; headline: string }[]): strin
   return espnRoundMap[roundPart] ?? roundPart;
 }
 
+// Allow up to 120s for rank updates on Vercel Pro
+export const maxDuration = 120;
+
+// ────────────────────────────────────────────────────────────────────────
+// Batched rank update — no massive self-joins, no timeouts
+// ────────────────────────────────────────────────────────────────────────
+async function updateRanksBatched(supabase: ReturnType<typeof getServiceClient>, debugLog: string[]) {
+  // Step 1: get score groups via RPC (tiny query — just a GROUP BY)
+  const { data: groups, error: groupErr } = await supabase.rpc("get_score_groups");
+
+  if (groupErr || !groups) {
+    debugLog.push(`RANKS: get_score_groups failed: ${groupErr?.message ?? "no data"}`);
+    return;
+  }
+
+  // Step 2: compute rank for each group and update
+  let runningRank = 1;
+  let updatedGroups = 0;
+
+  for (const g of groups) {
+    const { error: updateErr } = await supabase
+      .from("brackets")
+      .update({ rank: runningRank })
+      .eq("total_points", g.total_points)
+      .eq("correct_picks", g.correct_picks);
+
+    if (updateErr) {
+      debugLog.push(`RANKS: update failed for pts=${g.total_points}, correct=${g.correct_picks}: ${updateErr.message}`);
+    } else {
+      updatedGroups++;
+    }
+
+    runningRank += Number(g.cnt);
+  }
+
+  debugLog.push(`RANKS: updated ${updatedGroups} score groups, final rank position: ${runningRank - 1}`);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Main cron handler
+// ────────────────────────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   const authHeader = req.headers.get("authorization");
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -172,7 +213,6 @@ export async function GET(req: NextRequest) {
       .from("tournament_teams")
       .select("team_id, name, seed");
 
-    // DB name (lowercase) → team_id
     const dbNameToId = new Map<string, number>(
       (teams ?? []).map((t: any) => [t.name, t.team_id])
     );
@@ -249,11 +289,13 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // ── Update live game tracking ──
     await supabase.from("metadata").upsert({
       key: "live_game_idxs",
       value: JSON.stringify(liveGameIdxs),
     });
 
+    // ── Count total games completed ──
     const { count: gamesCompleted } = await supabase
       .from("game_results")
       .select("game_idx", { count: "exact" });
@@ -263,10 +305,37 @@ export async function GET(req: NextRequest) {
       { key: "last_updated", value: new Date().toISOString() },
     ]);
 
+    // ── Post-scoring updates (only if new games were scored) ──
     if (newResults > 0) {
-      await supabase.rpc("update_ranks");
-      await supabase.rpc("update_max_points");
-      await supabase.rpc("update_perfect_streak");
+      // 1. Ranks — batched by score group, no self-joins
+      await updateRanksBatched(supabase, debugLog);
+
+      // 2. Max points = total_points + remaining unplayed points
+      //    (max_points and perfect_streak are computed on-the-fly by the
+      //    /api/brackets enrichBracket function for each displayed page,
+      //    so they're always accurate in the UI. We also store max_points
+      //    in the DB for reference via a single arithmetic UPDATE.)
+      const decidedSet = new Set((existingResults ?? []).map((r: any) => r.game_idx));
+      // Include the games we just scored in this run
+      for (const idx of recorded) decidedSet.add(idx);
+      let remainingPts = 0;
+      for (const n of (nodes ?? [])) {
+        if (!decidedSet.has(n.game_idx)) {
+          remainingPts += ROUND_POINTS[n.round as Round] ?? 0;
+        }
+      }
+      // Use RPC to do: UPDATE brackets SET max_points = total_points + $remaining
+      const { error: mpErr } = await supabase.rpc("set_max_points", { p_remaining: remainingPts });
+      if (mpErr) {
+        debugLog.push(`MAX_POINTS: RPC failed (${mpErr.message}), UI still computes correctly on-the-fly`);
+      } else {
+        debugLog.push(`MAX_POINTS: set to total_points + ${remainingPts}`);
+      }
+
+      // 3. Perfect streak — computed on-the-fly by the API for each
+      //    displayed page (reads picks array, counts consecutive correct
+      //    from most recent decided game backward). No DB update needed.
+      debugLog.push(`STREAK: computed on-the-fly by API (no DB update needed)`);
     }
 
     return NextResponse.json({
