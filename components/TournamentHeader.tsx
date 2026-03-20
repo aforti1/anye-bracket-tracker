@@ -5,10 +5,14 @@ function smartNum(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) {
     const k = n / 1000;
-    return k % 1 === 0 ? `${k}K` : `${parseFloat(k.toFixed(2))}K`;
+    if (k >= 100) return `${Math.round(k)}K`;
+    if (k >= 10) return `${parseFloat((Math.round(k * 10) / 10).toFixed(1))}K`;
+    return `${parseFloat((Math.round(k * 100) / 100).toFixed(2))}K`;
   }
   const m = n / 1_000_000;
-  return m % 1 === 0 ? `${m}M` : `${parseFloat(m.toFixed(2))}M`;
+  if (m >= 100) return `${Math.round(m)}M`;
+  if (m >= 10) return `${parseFloat((Math.round(m * 10) / 10).toFixed(1))}M`;
+  return `${parseFloat((Math.round(m * 100) / 100).toFixed(2))}M`;
 }
 
 interface Props { summary: TournamentSummary; }
