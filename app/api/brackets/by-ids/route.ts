@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
 
   // Load game state for enrichment
   const [nodesRes, resultsRes] = await Promise.all([
-    supabase.from("game_nodes").select("round, game_idx").order("game_idx"),
+    supabase.from("game_nodes").select("game_idx, round, team_a_id, team_b_id, source_a, source_b").order("game_idx"),
     supabase.from("game_results").select("game_idx, winner_id").order("game_idx"),
   ]);
   const gameNodes = nodesRes.data ?? [];
@@ -31,9 +31,26 @@ export async function POST(req: NextRequest) {
   const decidedIdxes = Array.from(winnerByIdx.keys()).sort((a, b) => a - b);
   const decidedSet = new Set(decidedIdxes);
 
-  let remainingPointsSum = 0;
-  for (const n of gameNodes) {
-    if (!decidedSet.has(n.game_idx)) remainingPointsSum += ROUND_POINTS[n.round] ?? 0;
+  const nodeMap = new Map(gameNodes.map((n: any) => [n.game_idx, n]));
+  const eliminated = new Set<number>();
+  for (const gi of decidedIdxes) {
+    const node = nodeMap.get(gi);
+    if (!node) continue;
+    const winner = winnerByIdx.get(gi)!;
+    let participants: number[] = [];
+    if (node.round === "round_64") {
+      participants = [node.team_a_id, node.team_b_id].filter(Boolean);
+    } else {
+      if (node.source_a != null && winnerByIdx.has(node.source_a)) {
+        participants.push(winnerByIdx.get(node.source_a)!);
+      }
+      if (node.source_b != null && winnerByIdx.has(node.source_b)) {
+        participants.push(winnerByIdx.get(node.source_b)!);
+      }
+    }
+    for (const p of participants) {
+      if (p !== winner) eliminated.add(p);
+    }
   }
 
   // Fetch the specific rows
@@ -55,7 +72,15 @@ export async function POST(req: NextRequest) {
       const picks: number[] = typeof b.picks === "string"
         ? b.picks.split(",").map(Number)
         : (b.picks ?? []);
-      const max_points = b.total_points + remainingPointsSum;
+      let max_points = b.total_points;
+      for (const n of gameNodes) {
+        if (!decidedSet.has(n.game_idx)) {
+          const pt = picks[n.game_idx];
+          if (pt && !eliminated.has(pt)) {
+            max_points += ROUND_POINTS[n.round] ?? 0;
+          }
+        }
+      }
       let perfect_streak = 0;
       for (let i = decidedIdxes.length - 1; i >= 0; i--) {
         if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++;

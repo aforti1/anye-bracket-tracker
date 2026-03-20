@@ -44,10 +44,28 @@ export async function GET(req: NextRequest) {
   const decidedIdxes = Array.from(winnerByIdx.keys()).sort((a, b) => a - b);
   const decidedSet = new Set(decidedIdxes);
 
-  let remainingPointsSum = 0;
-  for (const n of gameNodes) {
-    if (!decidedSet.has(n.game_idx)) remainingPointsSum += ROUND_POINTS[n.round] ?? 0;
+  // Build set of eliminated teams from decided games
+  const eliminated = new Set<number>();
+  for (const gi of decidedIdxes) {
+    const node = nodeMap.get(gi);
+    if (!node) continue;
+    const winner = winnerByIdx.get(gi)!;
+    let participants: number[] = [];
+    if (node.round === "round_64") {
+      participants = [node.team_a_id, node.team_b_id].filter(Boolean);
+    } else {
+      if (node.source_a != null && winnerByIdx.has(node.source_a)) {
+        participants.push(winnerByIdx.get(node.source_a)!);
+      }
+      if (node.source_b != null && winnerByIdx.has(node.source_b)) {
+        participants.push(winnerByIdx.get(node.source_b)!);
+      }
+    }
+    for (const p of participants) {
+      if (p !== winner) eliminated.add(p);
+    }
   }
+
   const games_complete = gameResults.length;
 
   // Enrich a bracket row with computed fields (runs on page of results only)
@@ -55,7 +73,16 @@ export async function GET(req: NextRequest) {
     const picks: number[] = typeof b.picks === "string"
       ? b.picks.split(",").map(Number)
       : (b.picks ?? []);
-    const max_points = b.total_points + remainingPointsSum;
+    // Per-bracket max_points: only count future games where picked team is still alive
+    let max_points = b.total_points;
+    for (const n of gameNodes) {
+      if (!decidedSet.has(n.game_idx)) {
+        const pickedTeam = picks[n.game_idx];
+        if (pickedTeam && !eliminated.has(pickedTeam)) {
+          max_points += ROUND_POINTS[n.round] ?? 0;
+        }
+      }
+    }
     let perfect_streak = 0;
     for (let i = decidedIdxes.length - 1; i >= 0; i--) {
       if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++;
@@ -113,8 +140,8 @@ export async function GET(req: NextRequest) {
       const ids = (dataRes.data ?? []).map((r: any) => r.id);
       let enriched = (dataRes.data ?? []).map((r: any) => ({
         ...r,
-        max_points: r.total_points + remainingPointsSum,
-        perfect_streak: 0, // Can't compute without picks — acceptable tradeoff
+        max_points: 0, // Will be computed once picks are fetched below
+        perfect_streak: 0,
       }));
 
       // If we need perfect_streak, fetch picks for just this page
@@ -136,7 +163,16 @@ export async function GET(req: NextRequest) {
               if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++;
               else break;
             }
-            return { ...r, max_points: r.total_points + remainingPointsSum, perfect_streak };
+            let max_points = r.total_points;
+            for (const n of gameNodes) {
+              if (!decidedSet.has(n.game_idx)) {
+                const pt = picks[n.game_idx];
+                if (pt && !eliminated.has(pt)) {
+                  max_points += ROUND_POINTS[n.round] ?? 0;
+                }
+              }
+            }
+            return { ...r, max_points, perfect_streak };
           });
         }
       }
@@ -162,7 +198,7 @@ export async function GET(req: NextRequest) {
       // Fallback to JS scan if RPC not deployed yet
       console.error("Pick filter RPC failed, falling back to JS scan:", rpcError.message);
       return jsPickFilterFallback(
-        pickConditions, nodeMap, winnerByIdx, decidedIdxes, remainingPointsSum,
+        pickConditions, nodeMap, winnerByIdx, decidedIdxes, eliminated, gameNodes,
         champion_id, min_upsets, max_upsets, sortCol, sortAsc, sort, order,
         page, per_page, games_complete, enrichBracket
       );
@@ -212,7 +248,8 @@ async function jsPickFilterFallback(
   nodeMap: Map<number, any>,
   winnerByIdx: Map<number, number>,
   decidedIdxes: number[],
-  remainingPointsSum: number,
+  eliminated: Set<number>,
+  gameNodes: any[],
   champion_id: string | null,
   min_upsets: string | null,
   max_upsets: string | null,

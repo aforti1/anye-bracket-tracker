@@ -310,32 +310,11 @@ export async function GET(req: NextRequest) {
       // 1. Ranks — batched by score group, no self-joins
       await updateRanksBatched(supabase, debugLog);
 
-      // 2. Max points = total_points + remaining unplayed points
-      //    (max_points and perfect_streak are computed on-the-fly by the
-      //    /api/brackets enrichBracket function for each displayed page,
-      //    so they're always accurate in the UI. We also store max_points
-      //    in the DB for reference via a single arithmetic UPDATE.)
-      const decidedSet = new Set((existingResults ?? []).map((r: any) => r.game_idx));
-      // Include the games we just scored in this run
-      for (const idx of recorded) decidedSet.add(idx);
-      let remainingPts = 0;
-      for (const n of (nodes ?? [])) {
-        if (!decidedSet.has(n.game_idx)) {
-          remainingPts += ROUND_POINTS[n.round as Round] ?? 0;
-        }
-      }
-      // Use RPC to do: UPDATE brackets SET max_points = total_points + $remaining
-      const { error: mpErr } = await supabase.rpc("set_max_points", { p_remaining: remainingPts });
-      if (mpErr) {
-        debugLog.push(`MAX_POINTS: RPC failed (${mpErr.message}), UI still computes correctly on-the-fly`);
-      } else {
-        debugLog.push(`MAX_POINTS: set to total_points + ${remainingPts}`);
-      }
-
-      // 3. Perfect streak — computed on-the-fly by the API for each
-      //    displayed page (reads picks array, counts consecutive correct
-      //    from most recent decided game backward). No DB update needed.
-      debugLog.push(`STREAK: computed on-the-fly by API (no DB update needed)`);
+      // 2. Max points & perfect streak — both computed on-the-fly by
+      //    the /api/brackets enrichBracket function for each displayed page.
+      //    Max points is per-bracket (depends on which picked teams are
+      //    still alive), so it can't be a simple DB UPDATE.
+      debugLog.push(`MAX_POINTS + STREAK: computed on-the-fly by API`);
     }
 
     return NextResponse.json({
