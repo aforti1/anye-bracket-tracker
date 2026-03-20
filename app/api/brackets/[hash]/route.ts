@@ -38,9 +38,7 @@ export async function GET(
   );
   const nodeList = (nodesRes.data ?? []) as GameNode[];
 
-  const picks: number[] = typeof bracket.picks === "string" && bracket.picks.length > 0
-    ? bracket.picks.split(",").map(Number)
-    : [];
+  const picks: number[] = bracket.picks ?? [];
 
   const pick_details: PickDetail[] = nodeList.map((node) => {
     const predicted_id   = picks[node.game_idx] ?? 0;

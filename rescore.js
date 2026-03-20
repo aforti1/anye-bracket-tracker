@@ -70,11 +70,11 @@ async function main() {
     const groups = new Map(); // "pts,correct,streak" → id[]
 
     for (const b of brackets) {
-      const picks = b.picks.split(",");
+      const picks = b.picks;
       let points = 0, correct = 0, streak = 0;
 
       for (const g of games) {
-        if (parseInt(picks[g.game_idx]) === g.winner_id) {
+        if (picks[g.game_idx] === g.winner_id) {
           correct++;
           points += g.pts;
         }
@@ -82,8 +82,10 @@ async function main() {
 
       // Streak: consecutive correct from most recent completed game
       for (const g of gamesDesc) {
-        if (parseInt(picks[g.game_idx]) === g.winner_id) streak++;
-        else break;
+        if (picks[g.game_idx] === g.winner_id) 
+          streak++;
+        else 
+          break;
       }
 
       if (points > maxScore) maxScore = points;
@@ -127,6 +129,17 @@ async function main() {
 
   const totalTime = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`\n  ✓ Scoring complete (${totalTime}s, ${writeErrors} write errors)\n`);
+
+  await supabase.from("scoring_log").delete().gte("id", 0);
+  for (const g of games) {
+    await supabase.from("scoring_log").insert({
+      game_idx: g.game_idx,
+      winner_id: g.winner_id,
+      brackets_scored: total,
+      scored_at: new Date().toISOString(),
+    });
+  }
+  console.log(`  ✓ Scoring log updated (${games.length} games)`);
 
   // ── 4. Compute ranks via RPC ──────────────────────────────────────
   console.log("Computing ranks...");

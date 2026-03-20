@@ -44,22 +44,19 @@ export async function GET(req: NextRequest) {
   const decidedIdxes = Array.from(winnerByIdx.keys()).sort((a, b) => a - b);
   const decidedSet = new Set(decidedIdxes);
 
-  // Build set of eliminated teams from decided games
+  // Build eliminated set: teams that lost a decided game
   const eliminated = new Set<number>();
   for (const gi of decidedIdxes) {
     const node = nodeMap.get(gi);
     if (!node) continue;
     const winner = winnerByIdx.get(gi)!;
-    let participants: number[] = [];
+    const participants: number[] = [];
     if (node.round === "round_64") {
-      participants = [node.team_a_id, node.team_b_id].filter(Boolean);
+      if (node.team_a_id) participants.push(node.team_a_id);
+      if (node.team_b_id) participants.push(node.team_b_id);
     } else {
-      if (node.source_a != null && winnerByIdx.has(node.source_a)) {
-        participants.push(winnerByIdx.get(node.source_a)!);
-      }
-      if (node.source_b != null && winnerByIdx.has(node.source_b)) {
-        participants.push(winnerByIdx.get(node.source_b)!);
-      }
+      if (node.source_a != null && winnerByIdx.has(node.source_a)) participants.push(winnerByIdx.get(node.source_a)!);
+      if (node.source_b != null && winnerByIdx.has(node.source_b)) participants.push(winnerByIdx.get(node.source_b)!);
     }
     for (const p of participants) {
       if (p !== winner) eliminated.add(p);
@@ -70,15 +67,12 @@ export async function GET(req: NextRequest) {
 
   // Enrich a bracket row with computed fields (runs on page of results only)
   function enrichBracket(b: any) {
-    const picks: number[] = typeof b.picks === "string"
-      ? b.picks.split(",").map(Number)
-      : (b.picks ?? []);
-    // Per-bracket max_points: only count future games where picked team is still alive
+    const picks: number[] = b.picks ?? [];
     let max_points = b.total_points;
     for (const n of gameNodes) {
       if (!decidedSet.has(n.game_idx)) {
-        const pickedTeam = picks[n.game_idx];
-        if (pickedTeam && !eliminated.has(pickedTeam)) {
+        const picked = picks[n.game_idx];
+        if (picked && !eliminated.has(picked)) {
           max_points += ROUND_POINTS[n.round] ?? 0;
         }
       }
@@ -140,7 +134,7 @@ export async function GET(req: NextRequest) {
       const ids = (dataRes.data ?? []).map((r: any) => r.id);
       let enriched = (dataRes.data ?? []).map((r: any) => ({
         ...r,
-        max_points: 0, // Will be computed once picks are fetched below
+        max_points: 0,
         perfect_streak: 0,
       }));
 
@@ -155,9 +149,7 @@ export async function GET(req: NextRequest) {
           const picksMap = new Map(picksData.map((r: any) => [r.id, r.picks]));
           enriched = enriched.map((r: any) => {
             const rawPicks = picksMap.get(r.id);
-            const picks: number[] = typeof rawPicks === "string"
-              ? rawPicks.split(",").map(Number)
-              : (rawPicks ?? []);
+            const picks: number[] = rawPicks ?? [];
             let perfect_streak = 0;
             for (let i = decidedIdxes.length - 1; i >= 0; i--) {
               if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++;
@@ -295,9 +287,7 @@ async function jsPickFilterFallback(
 
     for (const row of data) {
       if (matchingRows.has(row.id)) continue;
-      const picks: number[] = typeof row.picks === "string"
-        ? row.picks.split(",").map(Number)
-        : (row.picks ?? []);
+      const picks: number[] = row.picks ?? [];
       if (matchesAll(picks)) matchingRows.set(row.id, row);
     }
 

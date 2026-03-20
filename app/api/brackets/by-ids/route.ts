@@ -37,16 +37,13 @@ export async function POST(req: NextRequest) {
     const node = nodeMap.get(gi);
     if (!node) continue;
     const winner = winnerByIdx.get(gi)!;
-    let participants: number[] = [];
+    const participants: number[] = [];
     if (node.round === "round_64") {
-      participants = [node.team_a_id, node.team_b_id].filter(Boolean);
+      if (node.team_a_id) participants.push(node.team_a_id);
+      if (node.team_b_id) participants.push(node.team_b_id);
     } else {
-      if (node.source_a != null && winnerByIdx.has(node.source_a)) {
-        participants.push(winnerByIdx.get(node.source_a)!);
-      }
-      if (node.source_b != null && winnerByIdx.has(node.source_b)) {
-        participants.push(winnerByIdx.get(node.source_b)!);
-      }
+      if (node.source_a != null && winnerByIdx.has(node.source_a)) participants.push(winnerByIdx.get(node.source_a)!);
+      if (node.source_b != null && winnerByIdx.has(node.source_b)) participants.push(winnerByIdx.get(node.source_b)!);
     }
     for (const p of participants) {
       if (p !== winner) eliminated.add(p);
@@ -69,14 +66,12 @@ export async function POST(req: NextRequest) {
     .map(id => rowMap.get(id))
     .filter(Boolean)
     .map((b: any) => {
-      const picks: number[] = typeof b.picks === "string"
-        ? b.picks.split(",").map(Number)
-        : (b.picks ?? []);
+      const picks: number[] = b.picks ?? [];
       let max_points = b.total_points;
       for (const n of gameNodes) {
         if (!decidedSet.has(n.game_idx)) {
-          const pt = picks[n.game_idx];
-          if (pt && !eliminated.has(pt)) {
+          const picked = picks[n.game_idx];
+          if (picked && !eliminated.has(picked)) {
             max_points += ROUND_POINTS[n.round] ?? 0;
           }
         }
