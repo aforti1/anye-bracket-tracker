@@ -1,25 +1,14 @@
 // app/page.tsx
-// ============================================================================
-// LANDING PAGE — Main entry point for the Anye Bracket Tracker
-// ============================================================================
-//
-// MIGRATION INSTRUCTIONS:
-//   1. Move the CURRENT app/page.tsx → app/mens/page.tsx
-//   2. Move app/brackets/ → app/mens/brackets/
-//   3. Place THIS file as app/page.tsx
-//   4. Create app/womens/page.tsx (copy of mens, different data source)
-//   5. Create app/womens/brackets/[hash]/page.tsx (copy of mens variant)
-//   6. Update BackButton links in bracket detail pages:
-//      - mens: href="/mens"
-//      - womens: href="/womens"
-//   7. Update not-found.tsx link to point to "/" instead of "/"
-//
-// ============================================================================
+// Landing page with Men's / Women's cards and About modal
+"use client";
 
+import { useState } from "react";
 import Link from "next/link";
-import AboutSection from "@/components/AboutSection";
+import AboutModal from "@/components/AboutModal";
 
 export default function LandingPage() {
+  const [showAbout, setShowAbout] = useState(false);
+
   return (
     <main
       style={{
@@ -103,8 +92,27 @@ export default function LandingPage() {
         />
       </div>
 
-      {/* About section */}
-      <AboutSection />
+      {/* About button */}
+      <button
+        onClick={() => setShowAbout(true)}
+        style={{
+          background: "linear-gradient(135deg, #f5a623, #e8941a)",
+          border: "1px solid #f5a62366",
+          borderRadius: 6,
+          padding: "8px 20px",
+          cursor: "pointer",
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
+          fontWeight: 600,
+          color: "#0a0a0b",
+          letterSpacing: "0.04em",
+          boxShadow: "0 0 12px rgba(245, 166, 35, 0.15)",
+        }}
+      >
+        About
+      </button>
+
+      {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
     </main>
   );
 }

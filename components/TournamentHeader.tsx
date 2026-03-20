@@ -31,7 +31,7 @@ export default function TournamentHeader({ summary, gender }: Props) {
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "28px 24px 24px" }}>
         <div style={{ marginBottom: 20, textAlign: "center" }}>
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, letterSpacing: "0.12em", color: "var(--text-muted)", textTransform: "uppercase", marginBottom: 6 }}>Bracket Portfolio · 2026 {gender === "womens" ? "Women's " : ""}March Madness</div>
-          <h1 style={{ fontFamily: "var(--font-display)", fontSize: "clamp(28px, 4vw, 44px)", fontWeight: 800, letterSpacing: "0.02em", color: "var(--text-primary)", lineHeight: 1.1, textTransform: "uppercase" }}>Anye Bracket Tracker</h1>
+          <a href="/" style={{ textDecoration: "none" }}><h1 style={{ fontFamily: "var(--font-display)", fontSize: "clamp(28px, 4vw, 44px)", fontWeight: 800, letterSpacing: "0.02em", color: "var(--text-primary)", lineHeight: 1.1, textTransform: "uppercase", cursor: "pointer" }}>Anye Bracket Tracker</h1></a>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 0, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", background: "var(--bg-card)", maxWidth: 800, margin: "0 auto" }}>
           {stats.map((stat, i) => (

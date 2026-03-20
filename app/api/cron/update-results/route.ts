@@ -1,8 +1,8 @@
 // app/api/cron/update-results/route.ts
 //
-// With picks as SMALLINT[], score_game completes on 1M rows in ~5-15s.
-// No batching needed for scoring. Ranks use get_score_groups (batched).
-// Reconciliation catches any edge case where insert succeeded but scoring didn't.
+// Scores brackets in 50K-row batches using score_game_range RPC.
+// Each batch completes in <1s. Full 1M takes ~20s per game.
+// No more timeouts.
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceClient } from "@/lib/db";
@@ -12,6 +12,8 @@ export const maxDuration = 120;
 
 const ESPN_URL =
   "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=100&limit=100";
+
+const BATCH_SIZE = 50000; // rows per scoring batch
 
 const ROUND_MAP: Record<string, Round> = {
   "First Four": "round_64", "First Round": "round_64",
@@ -86,6 +88,11 @@ const ESPN_TO_DB: Record<string, string> = {
   "Queens Royals":                "Queens NC",
   "LIU Sharks":                   "LIU Brooklyn",
   "NC State Wolfpack":            "NC State",
+  "Long Island University Sharks": "LIU Brooklyn",
+  "Queens University Royals":      "Queens NC",
+  "UMBC Retrievers":               "UMBC",
+  "SMU Mustangs":                  "SMU",
+  "North Dakota State Bison":      "N Dakota St",
 };
 
 interface ESPNGame {
@@ -129,25 +136,44 @@ function parseRoundFromNotes(notes: { type: string; headline: string }[]): strin
   return ({ "1st Round": "First Round", "2nd Round": "Second Round" } as any)[r] ?? r;
 }
 
-// Score + log. With SMALLINT[] picks, this completes in ~5-15s on 1M rows.
-async function scoreAndLog(
+// ── BATCHED SCORING — replaces the broken single-shot score_game RPC ──
+async function scoreBatched(
   supabase: ReturnType<typeof getServiceClient>,
-  gameIdx: number, winnerId: number, points: number, debugLog: string[],
+  gameIdx: number, winnerId: number, points: number,
+  minId: number, maxId: number, debugLog: string[],
 ): Promise<boolean> {
-  const { error } = await supabase.rpc("score_game", {
-    p_game_idx: gameIdx,
-    p_winner_id: winnerId,
-    p_points: points,
-  });
-  if (error) {
-    debugLog.push(`SCORE FAIL game_idx=${gameIdx}: ${error.message}`);
-    return false;
+  let totalAffected = 0;
+  let batchErrors = 0;
+
+  for (let start = minId; start <= maxId; start += BATCH_SIZE) {
+    const end = start + BATCH_SIZE;
+    const { data, error } = await supabase.rpc("score_game_range", {
+      p_game_idx: gameIdx,
+      p_winner_id: winnerId,
+      p_points: points,
+      p_min_id: start,
+      p_max_id: end,
+    });
+    if (error) {
+      debugLog.push(`BATCH FAIL ${start}-${end}: ${error.message}`);
+      batchErrors++;
+    } else {
+      totalAffected += (data ?? 0);
+    }
   }
-  debugLog.push(`SCORED game_idx ${gameIdx}: ${points} pts`);
-  return true;
+
+  debugLog.push(`SCORED game_idx ${gameIdx}: ${totalAffected} rows, ${batchErrors} errors`);
+
+  // Log to scoring_log
+  await supabase.from("scoring_log").insert({
+    game_idx: gameIdx, winner_id: winnerId,
+    brackets_scored: totalAffected, scored_at: new Date().toISOString(),
+  });
+
+  return batchErrors === 0;
 }
 
-// Batched rank update via score groups — no RANK() OVER window function.
+// Batched rank update via score groups
 async function updateRanksBatched(
   supabase: ReturnType<typeof getServiceClient>, debugLog: string[],
 ) {
@@ -175,14 +201,19 @@ export async function GET(req: NextRequest) {
 
   try {
     // ── Load all state in parallel ──
-    const [espnRes, existingRes, nodesRes, teamsRes, scoredLogRes] =
+    const [espnRes, existingRes, nodesRes, teamsRes, scoredLogRes, idRangeLoRes, idRangeHiRes] =
       await Promise.all([
         fetch(ESPN_URL, { next: { revalidate: 0 } }),
         supabase.from("game_results").select("game_idx, winner_id"),
         supabase.from("game_nodes").select("game_idx, round, team_a_id, team_b_id"),
         supabase.from("tournament_teams").select("team_id, name, seed"),
         supabase.from("scoring_log").select("game_idx"),
+        supabase.from("brackets").select("id").order("id", { ascending: true }).limit(1).single(),
+        supabase.from("brackets").select("id").order("id", { ascending: false }).limit(1).single(),
       ]);
+
+    const minId = idRangeLoRes.data?.id ?? 0;
+    const maxId = idRangeHiRes.data?.id ?? 0;
 
     const espnJson = await espnRes.json();
     const events: ESPNGame[] = espnJson.events ?? [];
@@ -198,14 +229,16 @@ export async function GET(req: NextRequest) {
     const liveGameIdxs: number[] = [];
     const debugLog: string[] = [];
 
-    // ── STEP 1: Reconcile orphaned games (in game_results but not scoring_log) ──
+    debugLog.push(`ID range: ${minId}–${maxId}, batch size: ${BATCH_SIZE}`);
+
+    // ── STEP 1: Reconcile orphaned games ──
     const orphaned = existingResults.filter((r: any) => !scoredSet.has(r.game_idx));
     if (orphaned.length > 0) {
       debugLog.push(`RECONCILE: ${orphaned.length} orphaned games`);
       for (const orphan of orphaned) {
         const round = nodeRoundMap.get(orphan.game_idx) as string;
         const pts = ROUND_POINTS[round as Round] ?? 0;
-        if (await scoreAndLog(supabase, orphan.game_idx, orphan.winner_id, pts, debugLog)) {
+        if (await scoreBatched(supabase, orphan.game_idx, orphan.winner_id, pts, minId, maxId, debugLog)) {
           newResults++;
         }
       }
@@ -240,7 +273,7 @@ export async function GET(req: NextRequest) {
         if (insertErr) { debugLog.push(`ERROR game_idx ${match.node.game_idx}: ${insertErr.message}`); continue; }
 
         const roundPts = ROUND_POINTS[round as Round] ?? 0;
-        if (await scoreAndLog(supabase, match.node.game_idx, winnerId, roundPts, debugLog)) {
+        if (await scoreBatched(supabase, match.node.game_idx, winnerId, roundPts, minId, maxId, debugLog)) {
           recorded.add(match.node.game_idx);
           newResults++;
         }
@@ -264,7 +297,7 @@ export async function GET(req: NextRequest) {
       { key: "last_updated", value: new Date().toISOString() },
     ]);
 
-    // ── STEP 4: Ranks (only if something was scored) ──
+    // ── STEP 4: Ranks ──
     if (newResults > 0) {
       await updateRanksBatched(supabase, debugLog);
     }

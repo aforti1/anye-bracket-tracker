@@ -1,4 +1,4 @@
-// app/page.tsx
+// app/mens/page.tsx
 import { Suspense } from "react";
 import { supabase } from "@/lib/db";
 import LeaderboardClient from "@/components/LeaderboardClient";
@@ -67,7 +67,7 @@ async function getChampionOptions() {
   }));
 }
 
-export default async function HomePage() {
+export default async function MensPage() {
   const [summary, champions] = await Promise.all([getSummary(), getChampionOptions()]);
 
   return (
@@ -75,7 +75,7 @@ export default async function HomePage() {
       <TournamentHeader summary={summary} />
       <div className="max-w-7xl mx-auto px-4 pb-16">
         <Suspense fallback={<LeaderboardSkeleton />}>
-          <LeaderboardClient summary={summary} champions={champions} />
+          <LeaderboardClient summary={summary} champions={champions} routeBase="/mens" />
         </Suspense>
       </div>
     </main>

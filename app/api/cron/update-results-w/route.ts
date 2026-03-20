@@ -1,10 +1,7 @@
 // app/api/cron/update-results-w/route.ts
 //
-// Women's tournament auto-scraper. Mirrors the men's cron exactly but:
-//   - ESPN URL: womens-college-basketball
-//   - Supabase tables: w_ prefix
-//   - RPC functions: w_ prefix
-//   - Team name map: women's tournament teams
+// Women's tournament auto-scraper with batched scoring.
+// Uses w_score_game_range to process 50K rows at a time.
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceClient } from "@/lib/db";
@@ -15,6 +12,8 @@ export const maxDuration = 120;
 const ESPN_URL =
   "https://site.api.espn.com/apis/site/v2/sports/basketball/womens-college-basketball/scoreboard?groups=100&limit=100";
 
+const BATCH_SIZE = 50000;
+
 const ROUND_MAP: Record<string, Round> = {
   "First Four": "round_64", "First Round": "round_64",
   "Second Round": "round_32", "Sweet 16": "sweet_16",
@@ -22,11 +21,7 @@ const ROUND_MAP: Record<string, Round> = {
   "Championship": "championship",
 };
 
-// ESPN displayName → Kaggle DB name for women's tournament teams.
-// Only entries where ESPN name differs from DB name are needed.
-// The fallback resolver handles cases not listed here.
 const ESPN_TO_DB: Record<string, string> = {
-  // — 2026 tournament teams (known mismatches) —
   "UConn Huskies":                "Connecticut",
   "South Carolina Gamecocks":     "South Carolina",
   "UCLA Bruins":                  "UCLA",
@@ -45,6 +40,7 @@ const ESPN_TO_DB: Record<string, string> = {
   "Nebraska Cornhuskers":         "Nebraska",
   "North Carolina Tar Heels":     "North Carolina",
   "Tennessee Volunteers":         "Tennessee",
+  "Tennessee Lady Volunteers":    "Tennessee",
   "Kentucky Wildcats":            "Kentucky",
   "Alabama Crimson Tide":         "Alabama",
   "Maryland Terrapins":           "Maryland",
@@ -121,15 +117,10 @@ interface ESPNGame {
 }
 
 function resolveESPN(name: string, map: Map<string, number>): number | undefined {
-  // 1. Try hardcoded map
   const dbName = ESPN_TO_DB[name];
   if (dbName) return map.get(dbName);
-
-  // 2. Try exact match (some teams match as-is, e.g. "Duke" vs "Duke")
   const direct = map.get(name);
   if (direct) return direct;
-
-  // 3. Try stripping mascot (last word) — handles "South Carolina Gamecocks" → "South Carolina"
   const words = name.split(" ");
   if (words.length >= 2) {
     for (let i = words.length - 1; i >= 1; i--) {
@@ -138,7 +129,6 @@ function resolveESPN(name: string, map: Map<string, number>): number | undefined
       if (match) return match;
     }
   }
-
   return undefined;
 }
 
@@ -166,21 +156,39 @@ function parseRoundFromNotes(notes: { type: string; headline: string }[]): strin
   return ({ "1st Round": "First Round", "2nd Round": "Second Round" } as any)[r] ?? r;
 }
 
-async function scoreAndLog(
+async function scoreBatched(
   supabase: ReturnType<typeof getServiceClient>,
-  gameIdx: number, winnerId: number, points: number, debugLog: string[],
+  gameIdx: number, winnerId: number, points: number,
+  minId: number, maxId: number, debugLog: string[],
 ): Promise<boolean> {
-  const { error } = await supabase.rpc("w_score_game", {
-    p_game_idx: gameIdx,
-    p_winner_id: winnerId,
-    p_points: points,
-  });
-  if (error) {
-    debugLog.push(`W_SCORE FAIL game_idx=${gameIdx}: ${error.message}`);
-    return false;
+  let totalAffected = 0;
+  let batchErrors = 0;
+
+  for (let start = minId; start <= maxId; start += BATCH_SIZE) {
+    const end = start + BATCH_SIZE;
+    const { data, error } = await supabase.rpc("w_score_game_range", {
+      p_game_idx: gameIdx,
+      p_winner_id: winnerId,
+      p_points: points,
+      p_min_id: start,
+      p_max_id: end,
+    });
+    if (error) {
+      debugLog.push(`W_BATCH FAIL ${start}-${end}: ${error.message}`);
+      batchErrors++;
+    } else {
+      totalAffected += (data ?? 0);
+    }
   }
-  debugLog.push(`W_SCORED game_idx ${gameIdx}: ${points} pts`);
-  return true;
+
+  debugLog.push(`W_SCORED game_idx ${gameIdx}: ${totalAffected} rows, ${batchErrors} errors`);
+
+  await supabase.from("w_scoring_log").insert({
+    game_idx: gameIdx, winner_id: winnerId,
+    brackets_scored: totalAffected, scored_at: new Date().toISOString(),
+  });
+
+  return batchErrors === 0;
 }
 
 async function updateRanksBatched(
@@ -209,15 +217,19 @@ export async function GET(req: NextRequest) {
   const supabase = getServiceClient();
 
   try {
-    // ── Load all state in parallel (all w_ tables) ──
-    const [espnRes, existingRes, nodesRes, teamsRes, scoredLogRes] =
+    const [espnRes, existingRes, nodesRes, teamsRes, scoredLogRes, idLoRes, idHiRes] =
       await Promise.all([
         fetch(ESPN_URL, { next: { revalidate: 0 } }),
         supabase.from("w_game_results").select("game_idx, winner_id"),
         supabase.from("w_game_nodes").select("game_idx, round, team_a_id, team_b_id"),
         supabase.from("w_tournament_teams").select("team_id, name, seed"),
         supabase.from("w_scoring_log").select("game_idx"),
+        supabase.from("w_brackets").select("id").order("id", { ascending: true }).limit(1).single(),
+        supabase.from("w_brackets").select("id").order("id", { ascending: false }).limit(1).single(),
       ]);
+
+    const minId = idLoRes.data?.id ?? 0;
+    const maxId = idHiRes.data?.id ?? 0;
 
     const espnJson = await espnRes.json();
     const events: ESPNGame[] = espnJson.events ?? [];
@@ -233,6 +245,8 @@ export async function GET(req: NextRequest) {
     const liveGameIdxs: number[] = [];
     const debugLog: string[] = [];
 
+    debugLog.push(`W ID range: ${minId}–${maxId}, batch size: ${BATCH_SIZE}`);
+
     // ── STEP 1: Reconcile orphaned games ──
     const orphaned = existingResults.filter((r: any) => !scoredSet.has(r.game_idx));
     if (orphaned.length > 0) {
@@ -240,7 +254,7 @@ export async function GET(req: NextRequest) {
       for (const orphan of orphaned) {
         const round = nodeRoundMap.get(orphan.game_idx) as string;
         const pts = ROUND_POINTS[round as Round] ?? 0;
-        if (await scoreAndLog(supabase, orphan.game_idx, orphan.winner_id, pts, debugLog)) {
+        if (await scoreBatched(supabase, orphan.game_idx, orphan.winner_id, pts, minId, maxId, debugLog)) {
           newResults++;
         }
       }
@@ -275,7 +289,7 @@ export async function GET(req: NextRequest) {
         if (insertErr) { debugLog.push(`W_ERROR game_idx ${match.node.game_idx}: ${insertErr.message}`); continue; }
 
         const roundPts = ROUND_POINTS[round as Round] ?? 0;
-        if (await scoreAndLog(supabase, match.node.game_idx, winnerId, roundPts, debugLog)) {
+        if (await scoreBatched(supabase, match.node.game_idx, winnerId, roundPts, minId, maxId, debugLog)) {
           recorded.add(match.node.game_idx);
           newResults++;
         }
@@ -299,7 +313,7 @@ export async function GET(req: NextRequest) {
       { key: "last_updated", value: new Date().toISOString() },
     ]);
 
-    // ── STEP 4: Ranks (only if something was scored) ──
+    // ── STEP 4: Ranks ──
     if (newResults > 0) {
       await updateRanksBatched(supabase, debugLog);
     }

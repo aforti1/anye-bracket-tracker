@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import type { BracketRow, TournamentSummary } from "@/lib/types";
 import AdvancedFilter from "@/components/AdvancedFilter";
-import AboutModal from "@/components/AboutModal";
 
 interface Champion { team_id: number; name: string; seed: number; count: number; }
 interface Props {
@@ -71,7 +70,6 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions, 
   const [totalPages, setTotalPages]   = useState(1);
   const [total, setTotal]             = useState(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showAbout, setShowAbout] = useState(false);
   const [minUpsetsInput, setMinUpsetsInput] = useState(minUpsets);
   const [maxUpsetsInput, setMaxUpsetsInput] = useState(maxUpsets);
 
@@ -380,15 +378,6 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions, 
           ...btnStyle, color: pickFilters.length > 0 ? "var(--accent)" : "var(--text-secondary)",
           borderColor: pickFilters.length > 0 ? "var(--accent-glow)" : "var(--border)",
         }}>Advanced{pickFilters.length > 0 ? ` (${pickFilters.length})` : ""}</button>
-        <button onClick={() => setShowAbout(true)} suppressHydrationWarning style={{
-          ...btnStyle,
-          background: "linear-gradient(135deg, #f5a623, #e8941a)",
-          border: "1px solid #f5a62366",
-          color: "#0a0a0b",
-          fontWeight: 600,
-          letterSpacing: "0.04em",
-          boxShadow: "0 0 12px rgba(245, 166, 35, 0.15)",
-        }}>About</button>
         {(champFilter || minUpsets || maxUpsets || pickFilters.length > 0) && (
           <button suppressHydrationWarning onClick={clearAllFilters}
             style={{ ...btnStyle, color: "var(--wrong)", borderColor: "var(--wrong-dim)" }}>Clear filters</button>
@@ -399,8 +388,6 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions, 
       {showAdvanced && <AdvancedFilter pickFilters={pickFilters} apiBase={apiBase}
         onApply={(f) => { applyFilterChange({ picks: f }); setShowAdvanced(false); }}
         onClose={() => setShowAdvanced(false)} />}
-
-      {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
 
       {/* Full-viewport loading overlay for expensive filter scans */}
       {filterLoading && (
