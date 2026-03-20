@@ -9,13 +9,13 @@ interface GameNode {
 }
 interface Team { team_id: number; name: string; seed: number; region: string; }
 interface PickFilter { game_idx: number; team_id: number; won: boolean; }
-interface Props { pickFilters: PickFilter[]; onApply: (filters: PickFilter[]) => void; onClose: () => void; }
+interface Props { pickFilters: PickFilter[]; onApply: (filters: PickFilter[]) => void; onClose: () => void; apiBase?: string; }
 
 const ROUND_SHORT: Record<string, string> = { round_64: "R64", round_32: "R32", sweet_16: "S16", elite_8: "E8", final_four: "FF", championship: "CH" };
 const REGION_COLOR: Record<string, string> = { East: "#3b82f6", West: "#a855f7", Midwest: "#f97316", South: "#22c55e" };
 const REGION_ROUNDS = ["round_64", "round_32", "sweet_16", "elite_8"];
 
-export default function AdvancedFilter({ pickFilters, onApply, onClose }: Props) {
+export default function AdvancedFilter({ pickFilters, onApply, onClose, apiBase = "/api" }: Props) {
   const [nodes, setNodes] = useState<GameNode[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,8 +26,8 @@ export default function AdvancedFilter({ pickFilters, onApply, onClose }: Props)
 
   useEffect(() => {
     Promise.all([
-      fetch("/api/game-nodes").then(r => r.json()).catch(() => []),
-      fetch("/api/teams").then(r => r.json()).catch(() => []),
+      fetch(`${apiBase}/game-nodes`).then(r => r.json()).catch(() => []),
+      fetch(`${apiBase}/teams`).then(r => r.json()).catch(() => []),
     ]).then(([n, t]) => { setNodes(n); setTeams(t); setLoading(false); });
   }, []);
 

@@ -1,87 +1,222 @@
 // app/page.tsx
-import { Suspense } from "react";
-import { supabase } from "@/lib/db";
-import LeaderboardClient from "@/components/LeaderboardClient";
-import TournamentHeader from "@/components/TournamentHeader";
-import type { TournamentSummary } from "@/lib/types";
+// ============================================================================
+// LANDING PAGE — Main entry point for the Anye Bracket Tracker
+// ============================================================================
+//
+// MIGRATION INSTRUCTIONS:
+//   1. Move the CURRENT app/page.tsx → app/mens/page.tsx
+//   2. Move app/brackets/ → app/mens/brackets/
+//   3. Place THIS file as app/page.tsx
+//   4. Create app/womens/page.tsx (copy of mens, different data source)
+//   5. Create app/womens/brackets/[hash]/page.tsx (copy of mens variant)
+//   6. Update BackButton links in bracket detail pages:
+//      - mens: href="/mens"
+//      - womens: href="/womens"
+//   7. Update not-found.tsx link to point to "/" instead of "/"
+//
+// ============================================================================
 
-export const revalidate = 30;
+import Link from "next/link";
+import AboutSection from "@/components/AboutSection";
 
-async function getSummary(): Promise<TournamentSummary> {
-  const [metaRes, topRes, resultsRes] = await Promise.all([
-    supabase.from("metadata").select("key, value"),
-    supabase.from("brackets")
-      .select("bracket_hash, total_points")
-      .order("total_points", { ascending: false })
-      .limit(1)
-      .single(),
-    supabase.from("game_results").select("game_idx", { count: "exact" }),
-  ]);
-
-  const metaMap = new Map<string, string>(
-    (metaRes.data ?? []).map((r: any) => [r.key, r.value])
-  );
-  const totalBrackets = parseInt(metaMap.get("total_brackets") ?? "0");
-  const gamesCompleted = resultsRes.count ?? 0;
-  const uniqueChampions = parseInt(metaMap.get("unique_champions") ?? "0");
-
-  let perfectRemaining = 0;
-  if (gamesCompleted > 0) {
-    const { count } = await supabase
-      .from("brackets")
-      .select("id", { count: "exact", head: true })
-      .eq("correct_picks", gamesCompleted);
-    perfectRemaining = count ?? 0;
-  } else {
-    perfectRemaining = totalBrackets;
-  }
-
-  return {
-    total_brackets: totalBrackets,
-    games_completed: gamesCompleted,
-    games_total: 63,
-    top_score: topRes.data?.total_points ?? 0,
-    top_bracket_hash: topRes.data?.bracket_hash ?? null,
-    unique_champions: uniqueChampions,
-    last_updated: metaMap.get("last_updated") ?? null,
-    perfect_remaining: perfectRemaining,
-  };
-}
-
-async function getChampionOptions() {
-  const { data, error } = await supabase
-    .from("champion_counts")
-    .select("champion_id, champion_name, champion_seed, count")
-    .order("count", { ascending: false });
-
-  if (error) {
-    console.error("champion_counts query failed:", error.message);
-    return [];
-  }
-
-  return (data ?? []).map((r: any) => ({
-    team_id: r.champion_id,
-    name: r.champion_name ?? "Unknown",
-    seed: r.champion_seed ?? 0,
-    count: r.count,
-  }));
-}
-
-export default async function HomePage() {
-  const [summary, champions] = await Promise.all([getSummary(), getChampionOptions()]);
-
+export default function LandingPage() {
   return (
-    <main className="min-h-screen">
-      <TournamentHeader summary={summary} />
-      <div className="max-w-7xl mx-auto px-4 pb-16">
-        <Suspense fallback={<LeaderboardSkeleton />}>
-          <LeaderboardClient summary={summary} champions={champions} />
-        </Suspense>
+    <main
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "48px 24px",
+        position: "relative",
+      }}
+    >
+      {/* Title block */}
+      <div style={{ textAlign: "center", marginBottom: 48 }}>
+        <div
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            letterSpacing: "0.12em",
+            color: "var(--text-muted)",
+            textTransform: "uppercase",
+            marginBottom: 8,
+          }}
+        >
+          Bracket Portfolio · 2026 March Madness
+        </div>
+        <h1
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: "clamp(36px, 6vw, 64px)",
+            fontWeight: 800,
+            letterSpacing: "0.02em",
+            color: "var(--text-primary)",
+            lineHeight: 1.05,
+            textTransform: "uppercase",
+          }}
+        >
+          Anye Bracket Tracker
+        </h1>
+        <p
+          style={{
+            fontFamily: "var(--font-body)",
+            fontSize: 14,
+            color: "var(--text-secondary)",
+            marginTop: 12,
+            maxWidth: 480,
+            margin: "12px auto 0",
+            lineHeight: 1.6,
+          }}
+        >
+          ML-generated bracket portfolios tracking real tournament results in real time.
+          Choose a tournament to explore.
+        </p>
       </div>
+
+      {/* Tournament cards */}
+      <div
+        style={{
+          display: "flex",
+          gap: 20,
+          flexWrap: "wrap",
+          justifyContent: "center",
+          maxWidth: 680,
+          width: "100%",
+          marginBottom: 48,
+        }}
+      >
+        <TournamentCard
+          href="/mens"
+          label="Men's"
+          title="Men's Brackets"
+          description="NCAA Men's Division I Tournament"
+          accentColor="var(--accent)"
+        />
+        <TournamentCard
+          href="/womens"
+          label="Women's"
+          title="Women's Brackets"
+          description="NCAA Women's Division I Tournament"
+          accentColor="#a855f7"
+        />
+      </div>
+
+      {/* About section */}
+      <AboutSection />
     </main>
   );
 }
 
-function LeaderboardSkeleton() {
-  return <div className="card animate-pulse" style={{ minHeight: "calc(100vh - 280px)" }} />;
+
+function TournamentCard({
+  href,
+  label,
+  title,
+  description,
+  accentColor,
+}: {
+  href: string;
+  label: string;
+  title: string;
+  description: string;
+  accentColor: string;
+}) {
+  return (
+    <Link
+      href={href}
+      style={{
+        flex: "1 1 280px",
+        maxWidth: 320,
+        textDecoration: "none",
+        color: "inherit",
+      }}
+    >
+      <div
+        className="tournament-card"
+        style={{
+          background: "var(--bg-card)",
+          border: "1px solid var(--border)",
+          borderRadius: 12,
+          padding: "32px 28px",
+          cursor: "pointer",
+          transition: "all 0.2s ease",
+          position: "relative",
+          overflow: "hidden",
+        }}
+      >
+        {/* Top accent line */}
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 2,
+            background: accentColor,
+            opacity: 0.6,
+          }}
+        />
+
+        {/* Label */}
+        <div
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            letterSpacing: "0.12em",
+            color: accentColor,
+            textTransform: "uppercase",
+            marginBottom: 10,
+          }}
+        >
+          {label}
+        </div>
+
+        {/* Title */}
+        <div
+          style={{
+            fontFamily: "var(--font-display)",
+            fontSize: 26,
+            fontWeight: 800,
+            letterSpacing: "0.01em",
+            color: "var(--text-primary)",
+            lineHeight: 1.1,
+            marginBottom: 8,
+          }}
+        >
+          {title}
+        </div>
+
+        {/* Description */}
+        <div
+          style={{
+            fontFamily: "var(--font-body)",
+            fontSize: 13,
+            color: "var(--text-secondary)",
+            lineHeight: 1.5,
+            marginBottom: 20,
+          }}
+        >
+          {description}
+        </div>
+
+        {/* Arrow */}
+        <div
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 13,
+            color: accentColor,
+            letterSpacing: "0.05em",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          View brackets
+          <span style={{ transition: "transform 0.2s" }} className="card-arrow">→</span>
+        </div>
+      </div>
+    </Link>
+  );
 }

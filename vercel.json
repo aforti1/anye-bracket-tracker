@@ -7,6 +7,14 @@
     {
       "path": "/api/cron/update-results",
       "schedule": "*/15 0-5,16-23 4-7 4 *"
+    },
+    {
+      "path": "/api/cron/update-results-w",
+      "schedule": "*/15 0-5,16-23 19-24,28-31 3 *"
+    },
+    {
+      "path": "/api/cron/update-results-w",
+      "schedule": "*/15 0-5,16-23 4-6 4 *"
     }
   ]
 }

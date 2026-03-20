@@ -7,7 +7,12 @@ import AdvancedFilter from "@/components/AdvancedFilter";
 import AboutModal from "@/components/AboutModal";
 
 interface Champion { team_id: number; name: string; seed: number; count: number; }
-interface Props { summary: TournamentSummary; champions: Champion[]; }
+interface Props {
+  summary: TournamentSummary;
+  champions: Champion[];
+  apiBase?: string;
+  routeBase?: string;
+}
 
 function smartNum(n: number): string {
   if (n < 1000) return String(n);
@@ -37,7 +42,7 @@ const COLUMNS = [
 const PER_PAGE = 50;
 const CACHE_KEY = "leaderboard_cache";
 
-function LeaderboardInner({ summary: serverSummary, champions: serverChampions }: Props) {
+function LeaderboardInner({ summary: serverSummary, champions: serverChampions, apiBase = "/api", routeBase = "" }: Props) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -46,8 +51,8 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
   const [champions, setChampions] = useState(serverChampions);
 
   useEffect(() => {
-    fetch("/api/summary", { cache: "no-store" }).then(r => r.json()).then(setSummary).catch(() => {});
-    fetch("/api/champions", { cache: "no-store" }).then(r => r.json()).then(setChampions).catch(() => {});
+    fetch(`${apiBase}/summary`, { cache: "no-store" }).then(r => r.json()).then(setSummary).catch(() => {});
+    fetch(`${apiBase}/champions`, { cache: "no-store" }).then(r => r.json()).then(setChampions).catch(() => {});
   }, []);
 
   const [page, setPage]               = useState(() => parseInt(searchParams.get("page") ?? "1"));
@@ -125,7 +130,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
     }
     setLoading(true);
     try {
-      const res = await fetch("/api/brackets/by-ids", {
+      const res = await fetch(`${apiBase}/brackets/by-ids`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: pageIds }),
@@ -189,7 +194,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
       const params = new URLSearchParams({
         page: String(page), per_page: String(PER_PAGE), sort, order,
       });
-      fetch(`/api/brackets?${params}`, { signal: controller.signal })
+      fetch(`${apiBase}/brackets?${params}`, { signal: controller.signal })
         .then(r => r.json())
         .then(data => {
           if (data.error) {
@@ -262,7 +267,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
     params.set("sort", sort);
     params.set("order", order);
 
-    fetch(`/api/brackets/filter-ids?${params}`)
+    fetch(`${apiBase}/brackets/filter-ids?${params}`)
       .then(r => r.json())
       .then(data => {
         if (data.error) {
@@ -391,7 +396,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
         <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)" }}>{smartNum(total)} brackets</span>
       </div>
 
-      {showAdvanced && <AdvancedFilter pickFilters={pickFilters}
+      {showAdvanced && <AdvancedFilter pickFilters={pickFilters} apiBase={apiBase}
         onApply={(f) => { applyFilterChange({ picks: f }); setShowAdvanced(false); }}
         onClose={() => setShowAdvanced(false)} />}
 
@@ -444,7 +449,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions }
               ) : (
                 brackets.map((b, idx) => (
                   <tr key={`${b.id}-${idx}`}
-                    onClick={() => router.push(`/brackets/${b.bracket_hash}`)}
+                    onClick={() => router.push(`${routeBase}/brackets/${b.bracket_hash}`)}
                     style={{ borderBottom: "1px solid var(--border-subtle)", cursor: "pointer", transition: "background 0.1s" }}
                     onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-elevated)")}
                     onMouseLeave={e => (e.currentTarget.style.background = "transparent")} className="fade-in">

@@ -15,9 +15,9 @@ function smartNum(n: number): string {
   return `${parseFloat((Math.round(m * 100) / 100).toFixed(2))}M`;
 }
 
-interface Props { summary: TournamentSummary; }
+interface Props { summary: TournamentSummary; gender?: "mens" | "womens"; }
 
-export default function TournamentHeader({ summary }: Props) {
+export default function TournamentHeader({ summary, gender }: Props) {
   const { total_brackets, games_completed, games_total, top_score, unique_champions, perfect_remaining } = summary;
   const stats = [
     { label: "Brackets",          value: smartNum(total_brackets) },
@@ -30,7 +30,7 @@ export default function TournamentHeader({ summary }: Props) {
     <div style={{ borderBottom: "1px solid var(--border)", marginBottom: 32 }}>
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "28px 24px 24px" }}>
         <div style={{ marginBottom: 20, textAlign: "center" }}>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, letterSpacing: "0.12em", color: "var(--text-muted)", textTransform: "uppercase", marginBottom: 6 }}>Bracket Portfolio · 2026 March Madness</div>
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, letterSpacing: "0.12em", color: "var(--text-muted)", textTransform: "uppercase", marginBottom: 6 }}>Bracket Portfolio · 2026 {gender === "womens" ? "Women's " : ""}March Madness</div>
           <h1 style={{ fontFamily: "var(--font-display)", fontSize: "clamp(28px, 4vw, 44px)", fontWeight: 800, letterSpacing: "0.02em", color: "var(--text-primary)", lineHeight: 1.1, textTransform: "uppercase" }}>Anye Bracket Tracker</h1>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 0, border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", background: "var(--bg-card)", maxWidth: 800, margin: "0 auto" }}>

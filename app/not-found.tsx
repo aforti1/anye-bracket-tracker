@@ -43,7 +43,7 @@ export default function NotFound() {
         borderRadius: 6,
         padding: "8px 20px",
       }}>
-        ← Back to leaderboard
+        ← Back to home
       </Link>
     </main>
   );
