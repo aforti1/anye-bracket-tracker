@@ -39,9 +39,9 @@ const COLUMNS = [
 ];
 
 const PER_PAGE = 50;
-const CACHE_KEY = "leaderboard_cache";
 
 function LeaderboardInner({ summary: serverSummary, champions: serverChampions, apiBase = "/api", routeBase = "" }: Props) {
+  const CACHE_KEY = `leaderboard_cache_${routeBase || "mens"}`;
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();

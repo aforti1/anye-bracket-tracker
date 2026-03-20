@@ -35,7 +35,7 @@ export async function GET(req: NextRequest) {
   // Load game structure (needed for enrichment: max_points, perfect_streak)
   const [nodesRes, resultsRes] = await Promise.all([
     supabase.from("game_nodes").select("*").order("game_idx"),
-    supabase.from("game_results").select("game_idx, winner_id").order("game_idx"),
+    supabase.from("game_results").select("game_idx, winner_id, completed_at").order("completed_at"),
   ]);
   const gameNodes = nodesRes.data ?? [];
   const gameResults = resultsRes.data ?? [];
@@ -43,6 +43,8 @@ export async function GET(req: NextRequest) {
   const winnerByIdx = new Map(gameResults.map(r => [r.game_idx, r.winner_id]));
   const decidedIdxes = Array.from(winnerByIdx.keys()).sort((a, b) => a - b);
   const decidedSet = new Set(decidedIdxes);
+  // For streak: order by when games actually finished, not bracket tree position
+  const decidedByTime = gameResults.map((r: any) => r.game_idx);
 
   // Build eliminated set: teams that lost a decided game
   const eliminated = new Set<number>();
@@ -78,8 +80,8 @@ export async function GET(req: NextRequest) {
       }
     }
     let perfect_streak = 0;
-    for (let i = decidedIdxes.length - 1; i >= 0; i--) {
-      if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++;
+    for (let i = decidedByTime.length - 1; i >= 0; i--) {
+      if (picks[decidedByTime[i]] === winnerByIdx.get(decidedByTime[i])) perfect_streak++;
       else break;
     }
     const { picks: _, ...rest } = b;
@@ -88,7 +90,6 @@ export async function GET(req: NextRequest) {
 
   // ── PICK FILTER PATH (uses SQL RPC) ──
   if (pickConditions.length > 0) {
-    // Build conditions with source_a/source_b for the "reached" check in SQL
     const conditionsWithSources = pickConditions.map(c => {
       const node = nodeMap.get(c.game_idx);
       return {
@@ -101,11 +102,9 @@ export async function GET(req: NextRequest) {
     });
 
     const conditions = conditionsWithSources;
-
     const offset = (page - 1) * per_page;
 
     try {
-      // Two parallel RPC calls: count + paginated results
       const [countRes, dataRes] = await Promise.all([
         supabase.rpc("count_filtered_brackets", {
           p_conditions: conditions,
@@ -130,16 +129,12 @@ export async function GET(req: NextRequest) {
       }
 
       const total = Number(countRes.data ?? 0);
-      // RPC doesn't return picks, so we need to fetch them for enrichment
       const ids = (dataRes.data ?? []).map((r: any) => r.id);
       let enriched = (dataRes.data ?? []).map((r: any) => ({
-        ...r,
-        max_points: 0,
-        perfect_streak: 0,
+        ...r, max_points: 0, perfect_streak: 0,
       }));
 
-      // If we need perfect_streak, fetch picks for just this page
-      if (ids.length > 0 && decidedIdxes.length > 0) {
+      if (ids.length > 0 && decidedByTime.length > 0) {
         const { data: picksData } = await supabase
           .from("brackets")
           .select("id, picks")
@@ -148,11 +143,10 @@ export async function GET(req: NextRequest) {
         if (picksData) {
           const picksMap = new Map(picksData.map((r: any) => [r.id, r.picks]));
           enriched = enriched.map((r: any) => {
-            const rawPicks = picksMap.get(r.id);
-            const picks: number[] = rawPicks ?? [];
+            const picks: number[] = picksMap.get(r.id) ?? [];
             let perfect_streak = 0;
-            for (let i = decidedIdxes.length - 1; i >= 0; i--) {
-              if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++;
+            for (let i = decidedByTime.length - 1; i >= 0; i--) {
+              if (picks[decidedByTime[i]] === winnerByIdx.get(decidedByTime[i])) perfect_streak++;
               else break;
             }
             let max_points = r.total_points;
@@ -169,7 +163,6 @@ export async function GET(req: NextRequest) {
         }
       }
 
-      // Sort by perfect_streak client-side if that's the sort column (can't do in SQL)
       if (sort === "perfect_streak") {
         enriched.sort((a: any, b: any) => {
           const d = (a.perfect_streak ?? 0) - (b.perfect_streak ?? 0);
@@ -178,32 +171,25 @@ export async function GET(req: NextRequest) {
       }
 
       return NextResponse.json({
-        brackets: enriched,
-        total,
-        page,
-        per_page,
+        brackets: enriched, total, page, per_page,
         total_pages: Math.ceil(total / per_page),
-        games_complete,
-        tournament_live: games_complete > 0 && games_complete < 63,
+        games_complete, tournament_live: games_complete > 0 && games_complete < 63,
       });
     } catch (rpcError: any) {
-      // Fallback to JS scan if RPC not deployed yet
       console.error("Pick filter RPC failed, falling back to JS scan:", rpcError.message);
       return jsPickFilterFallback(
-        pickConditions, nodeMap, winnerByIdx, decidedIdxes, eliminated, gameNodes,
+        pickConditions, nodeMap, winnerByIdx, decidedByTime, eliminated, gameNodes,
         champion_id, min_upsets, max_upsets, sortCol, sortAsc, sort, order,
         page, per_page, games_complete, enrichBracket
       );
     }
   }
 
-  // ── NORMAL PATH (no pick filters — fast indexed query) ──
+  // ── NORMAL PATH ──
   const from2 = (page - 1) * per_page;
   const to2 = from2 + per_page - 1;
   const hasAnyFilter = !!(champion_id || min_upsets || max_upsets);
 
-  // When no filters: skip count: "exact" (it scans all 1M rows and is very slow).
-  // Instead, read the total from the brackets table estimate or metadata.
   const selectFields = "id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank";
 
   let query = hasAnyFilter
@@ -218,18 +204,16 @@ export async function GET(req: NextRequest) {
   const { data, error, count } = await query;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // For unfiltered queries, get total from metadata (fast) instead of count: "exact" (slow)
   let total: number;
   if (hasAnyFilter) {
     total = count ?? 0;
   } else {
     const { data: meta } = await supabase.from("metadata").select("value").eq("key", "total_brackets").single();
-    total = parseInt(meta?.value ?? "0") || 1000000; // fallback to known bracket count
+    total = parseInt(meta?.value ?? "0") || 1000000;
   }
 
   let enriched = (data ?? []).map(enrichBracket);
 
-  // Sort by computed columns client-side
   if (sort === "perfect_streak") {
     enriched.sort((a: any, b: any) => {
       const d = (a.perfect_streak ?? 0) - (b.perfect_streak ?? 0);
@@ -238,22 +222,18 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json({
-    brackets: enriched,
-    total,
-    page,
-    per_page,
+    brackets: enriched, total, page, per_page,
     total_pages: Math.ceil(total / per_page),
-    games_complete,
-    tournament_live: games_complete > 0 && games_complete < 63,
+    games_complete, tournament_live: games_complete > 0 && games_complete < 63,
   });
 }
 
-// ── JS FALLBACK for pick filtering (used if RPC not deployed) ──
+// ── JS FALLBACK for pick filtering ──
 async function jsPickFilterFallback(
   pickConditions: { game_idx: number; team_id: number; won: boolean }[],
   nodeMap: Map<number, any>,
   winnerByIdx: Map<number, number>,
-  decidedIdxes: number[],
+  decidedByTime: number[],
   eliminated: Set<number>,
   gameNodes: any[],
   champion_id: string | null,
@@ -268,6 +248,8 @@ async function jsPickFilterFallback(
   games_complete: number,
   enrichBracket: (b: any) => any,
 ) {
+  const decidedSet = new Set(decidedByTime);
+
   function teamReachedGame(picks: number[], gi: number, tid: number): boolean {
     const n = nodeMap.get(gi);
     if (!n) return false;

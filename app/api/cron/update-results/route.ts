@@ -92,6 +92,7 @@ const ESPN_TO_DB: Record<string, string> = {
   "Queens University Royals":      "Queens NC",
   "UMBC Retrievers":               "UMBC",
   "SMU Mustangs":                  "SMU",
+  "North Dakota State Bison":      "N Dakota St",
 };
 
 interface ESPNGame {

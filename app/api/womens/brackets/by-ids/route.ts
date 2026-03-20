@@ -21,13 +21,14 @@ export async function POST(req: NextRequest) {
 
   const [nodesRes, resultsRes] = await Promise.all([
     supabase.from("w_game_nodes").select("game_idx, round, team_a_id, team_b_id, source_a, source_b").order("game_idx"),
-    supabase.from("w_game_results").select("game_idx, winner_id").order("game_idx"),
+    supabase.from("w_game_results").select("game_idx, winner_id, completed_at").order("completed_at"),
   ]);
   const gameNodes = nodesRes.data ?? [];
   const gameResults = resultsRes.data ?? [];
   const winnerByIdx = new Map(gameResults.map(r => [r.game_idx, r.winner_id]));
   const decidedIdxes = Array.from(winnerByIdx.keys()).sort((a, b) => a - b);
   const decidedSet = new Set(decidedIdxes);
+  const decidedByTime = gameResults.map((r: any) => r.game_idx);
 
   const nodeMap = new Map(gameNodes.map((n: any) => [n.game_idx, n]));
   const eliminated = new Set<number>();
@@ -73,8 +74,8 @@ export async function POST(req: NextRequest) {
         }
       }
       let perfect_streak = 0;
-      for (let i = decidedIdxes.length - 1; i >= 0; i--) {
-        if (picks[decidedIdxes[i]] === winnerByIdx.get(decidedIdxes[i])) perfect_streak++;
+      for (let i = decidedByTime.length - 1; i >= 0; i--) {
+        if (picks[decidedByTime[i]] === winnerByIdx.get(decidedByTime[i])) perfect_streak++;
         else break;
       }
       const { picks: _, ...rest } = b;
