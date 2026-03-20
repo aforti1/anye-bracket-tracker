@@ -200,10 +200,15 @@ export async function GET(req: NextRequest) {
   // ── NORMAL PATH (no pick filters — fast indexed query) ──
   const from2 = (page - 1) * per_page;
   const to2 = from2 + per_page - 1;
+  const hasAnyFilter = !!(champion_id || min_upsets || max_upsets);
 
-  let query = supabase.from("brackets")
-    .select("id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank", { count: "exact" })
-    .order(sortCol, { ascending: sortAsc });
+  // When no filters: skip count: "exact" (it scans all 1M rows and is very slow).
+  // Instead, read the total from the brackets table estimate or metadata.
+  const selectFields = "id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank";
+
+  let query = hasAnyFilter
+    ? supabase.from("brackets").select(selectFields, { count: "exact" }).order(sortCol, { ascending: sortAsc })
+    : supabase.from("brackets").select(selectFields).order(sortCol, { ascending: sortAsc });
 
   if (champion_id) query = query.eq("champion_id", parseInt(champion_id));
   if (min_upsets)  query = query.gte("upset_count", parseInt(min_upsets));
@@ -212,6 +217,15 @@ export async function GET(req: NextRequest) {
 
   const { data, error, count } = await query;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // For unfiltered queries, get total from metadata (fast) instead of count: "exact" (slow)
+  let total: number;
+  if (hasAnyFilter) {
+    total = count ?? 0;
+  } else {
+    const { data: meta } = await supabase.from("metadata").select("value").eq("key", "total_brackets").single();
+    total = parseInt(meta?.value ?? "0") || 1000000; // fallback to known bracket count
+  }
 
   let enriched = (data ?? []).map(enrichBracket);
 
@@ -225,10 +239,10 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     brackets: enriched,
-    total: count ?? 0,
+    total,
     page,
     per_page,
-    total_pages: Math.ceil((count ?? 0) / per_page),
+    total_pages: Math.ceil(total / per_page),
     games_complete,
     tournament_live: games_complete > 0 && games_complete < 63,
   });
