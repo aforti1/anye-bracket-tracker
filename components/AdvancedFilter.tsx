@@ -1,6 +1,6 @@
 // components/AdvancedFilter.tsx
 "use client";
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 
 interface GameNode {
   game_idx: number; round: string; region: string; slot: number;
@@ -33,6 +33,28 @@ export default function AdvancedFilter({ pickFilters, onApply, onClose }: Props)
 
   const teamMap = useMemo(() => new Map(teams.map(t => [t.team_id, t])), [teams]);
   const nodeMap = useMemo(() => new Map(nodes.map(n => [n.game_idx, n])), [nodes]);
+
+  // Callback ref: nudge dropdown into viewport after it mounts
+  const keepInView = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return;
+    // Reset to default centered position first
+    el.style.left = "50%";
+    el.style.right = "auto";
+    el.style.transform = "translateX(-50%)";
+    // Measure and adjust
+    requestAnimationFrame(() => {
+      const rect = el.getBoundingClientRect();
+      const pad = 8;
+      if (rect.left < pad) {
+        el.style.left = "0";
+        el.style.transform = "none";
+      } else if (rect.right > window.innerWidth - pad) {
+        el.style.left = "auto";
+        el.style.right = "0";
+        el.style.transform = "none";
+      }
+    });
+  }, []);
 
   // Get all downstream games (games that this game feeds into)
   const getDownstreamGames = useMemo(() => (gi: number): Set<number> => {
@@ -205,7 +227,7 @@ export default function AdvancedFilter({ pickFilters, onApply, onClose }: Props)
         {isActive && !selectedTeam && (() => {
           const valid = getValidTeams(node.game_idx);
           return (
-            <div style={{ position: "absolute", top: SZ + 4, left: "50%", transform: "translateX(-50%)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: 4, zIndex: 100, maxHeight: 220, overflowY: "auto", width: 190, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+            <div ref={keepInView} style={{ position: "absolute", top: SZ + 4, left: "50%", transform: "translateX(-50%)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: 4, zIndex: 100, maxHeight: 220, overflowY: "auto", width: 190, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
               <div style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-muted)", padding: "4px 8px", letterSpacing: "0.08em", textTransform: "uppercase" }}>Select team</div>
               {valid.length === 0
                 ? <div style={{ padding: 8, fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)", textAlign: "center" }}>No valid teams</div>
@@ -220,7 +242,7 @@ export default function AdvancedFilter({ pickFilters, onApply, onClose }: Props)
           );
         })()}
         {isActive && selectedTeam && (
-          <div style={{ position: "absolute", top: SZ + 4, left: "50%", transform: "translateX(-50%)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: 8, zIndex: 100, width: 170, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+          <div ref={keepInView} style={{ position: "absolute", top: SZ + 4, left: "50%", transform: "translateX(-50%)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 8, padding: 8, zIndex: 100, width: 170, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
             <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-muted)", marginBottom: 6, letterSpacing: "0.08em", textTransform: "uppercase" }}>{teamMap.get(selectedTeam)?.name ?? "?"}</div>
             <div style={{ display: "flex", gap: 6 }}>
               <button onClick={e => { e.stopPropagation(); addFilter(node.game_idx, selectedTeam, true); }} style={{ flex: 1, padding: "6px 0", borderRadius: 6, border: "1px solid var(--correct)", background: "var(--correct-dim)", color: "var(--correct)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Won ✓</button>
