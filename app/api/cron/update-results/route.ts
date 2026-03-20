@@ -265,6 +265,8 @@ export async function GET(req: NextRequest) {
 
     if (newResults > 0) {
       await supabase.rpc("update_ranks");
+      await supabase.rpc("update_max_points");
+      await supabase.rpc("update_perfect_streak");
     }
 
     return NextResponse.json({

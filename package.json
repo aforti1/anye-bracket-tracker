@@ -11,10 +11,11 @@
     "seed:dry": "npx ts-node --project tsconfig.scripts.json scripts/seed-db.ts --dry-run"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
-    "next": "^15.2.3",
     "@dsnp/parquetjs": "^1.8.3",
+    "@supabase/supabase-js": "^2.39.0",
     "dotenv": "^16.4.5",
+    "next": "^15.2.3",
+    "pg": "^8.20.0",
     "react": "^18",
     "react-dom": "^18"
   },
