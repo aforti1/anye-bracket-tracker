@@ -17,16 +17,17 @@ function smartNum(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) {
     const k = n / 1000;
+    if (Math.round(k) >= 1000) return "1M";
     if (k >= 100) return `${Math.round(k)}K`;
     if (k >= 10) return `${parseFloat((Math.round(k * 10) / 10).toFixed(1))}K`;
     return `${parseFloat((Math.round(k * 100) / 100).toFixed(2))}K`;
   }
   const m = n / 1_000_000;
+  if (Math.round(m) >= 1000) return "1B";
   if (m >= 100) return `${Math.round(m)}M`;
   if (m >= 10) return `${parseFloat((Math.round(m * 10) / 10).toFixed(1))}M`;
   return `${parseFloat((Math.round(m * 100) / 100).toFixed(2))}M`;
 }
-
 const COLUMNS = [
   { key: "rank",            label: "Rank",            sortable: true },
   { key: "bracket_hash",    label: "Bracket ID",      sortable: true },
@@ -98,7 +99,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions, 
     if (maxUpsets) params.set("max_upsets", maxUpsets);
     if (pickFilters.length > 0) params.set("picks", JSON.stringify(pickFilters));
     const qs = params.toString();
-    window.history.replaceState(null, "", qs ? `${pathname}?${qs}` : pathname);
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   }, [page, sort, order, champFilter, minUpsets, maxUpsets, pickFilters, pathname]);
 
   // Build a key that uniquely identifies the current filter + sort combination
@@ -135,14 +136,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions, 
       });
       const data = await res.json();
       let results = data.brackets ?? [];
-      // Sort by computed columns client-side (these can't be sorted in SQL)
-      if (sort === "max_points" || sort === "perfect_streak") {
-        results.sort((a: any, b: any) => {
-          const va = a[sort] ?? 0;
-          const vb = b[sort] ?? 0;
-          return order === "desc" ? vb - va : va - vb;
-        });
-      }
+
       setBrackets(results);
       // Cache for back-nav
       try {

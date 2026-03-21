@@ -71,7 +71,7 @@ export default async function WomensPage() {
   const [summary, champions] = await Promise.all([getSummary(), getChampionOptions()]);
 
   return (
-    <main className="min-h-screen">
+    <main className="min-h-screen" style={{ "--accent": "#a855f7", "--accent-dim": "#a855f722", "--accent-glow": "#a855f740" } as React.CSSProperties}>
       <TournamentHeader summary={summary} gender="womens" />
       <div className="max-w-7xl mx-auto px-4 pb-16">
         <Suspense fallback={<LeaderboardSkeleton />}>

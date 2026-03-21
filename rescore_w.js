@@ -11,15 +11,14 @@ const ROUND_POINTS = {
   elite_8: 80, final_four: 160, championship: 320,
 };
 
-const FETCH_BATCH = 10000;  // rows per read
-const WRITE_CHUNK = 1000;   // IDs per write
+const FETCH_BATCH = 10000;
+const WRITE_CHUNK = 1000;
 
 async function main() {
-  console.log("\n=== RESCORE ALL BRACKETS ===\n");
+  console.log("\n=== RESCORE ALL WOMEN'S BRACKETS ===\n");
 
-  // ── 1. Load game results + nodes ──────────────────────────────────
-  const { data: gameResults } = await supabase.from("game_results").select("game_idx, winner_id");
-  const { data: gameNodes } = await supabase.from("game_nodes").select("game_idx, round");
+  const { data: gameResults } = await supabase.from("w_game_results").select("game_idx, winner_id");
+  const { data: gameNodes } = await supabase.from("w_game_nodes").select("game_idx, round");
   const nodeMap = new Map(gameNodes.map(n => [n.game_idx, n]));
 
   const games = gameResults.map(gr => ({
@@ -32,10 +31,8 @@ async function main() {
   console.log(`Completed games: ${games.length}`);
   if (games.length === 0) { console.log("Nothing to score."); return; }
 
-  // Sort descending for streak calc
   const gamesDesc = [...games].sort((a, b) => b.game_idx - a.game_idx);
 
-  // Remaining points from unplayed games
   const playedSet = new Set(games.map(g => g.game_idx));
   let remainingPts = 0;
   for (const n of gameNodes) {
@@ -43,15 +40,13 @@ async function main() {
   }
   console.log(`Remaining possible points: ${remainingPts}`);
 
-  // ── 2. Get ID range ───────────────────────────────────────────────
-  const { data: lo } = await supabase.from("brackets").select("id").order("id", { ascending: true }).limit(1).single();
-  const { data: hi } = await supabase.from("brackets").select("id").order("id", { ascending: false }).limit(1).single();
+  const { data: lo } = await supabase.from("w_brackets").select("id").order("id", { ascending: true }).limit(1).single();
+  const { data: hi } = await supabase.from("w_brackets").select("id").order("id", { ascending: false }).limit(1).single();
   if (!lo || !hi) { console.log("No brackets found."); return; }
   const minId = lo.id, maxId = hi.id;
-  const { count: total } = await supabase.from("brackets").select("id", { count: "exact", head: true });
+  const { count: total } = await supabase.from("w_brackets").select("id", { count: "exact", head: true });
   console.log(`Brackets: ${(total || 0).toLocaleString()}  ID range: ${minId}–${maxId}\n`);
 
-  // ── 3. Fetch → Score → Write in batches ───────────────────────────
   let processed = 0, maxScore = 0, maxCorrect = 0, writeErrors = 0;
   const t0 = Date.now();
 
@@ -59,15 +54,14 @@ async function main() {
     const end = Math.min(start + FETCH_BATCH - 1, maxId);
 
     const { data: brackets, error } = await supabase
-      .from("brackets")
+      .from("w_brackets")
       .select("id, picks")
       .gte("id", start)
       .lte("id", end);
 
     if (error || !brackets || brackets.length === 0) continue;
 
-    // Group brackets by computed score for efficient writes
-    const groups = new Map(); // "pts,correct,streak" → id[]
+    const groups = new Map();
 
     for (const b of brackets) {
       const picks = b.picks;
@@ -80,11 +74,10 @@ async function main() {
         }
       }
 
-      // Streak: consecutive correct from most recent completed game
       for (const g of gamesDesc) {
-        if (picks[g.game_idx] === g.winner_id) 
+        if (picks[g.game_idx] === g.winner_id)
           streak++;
-        else 
+        else
           break;
       }
 
@@ -96,7 +89,6 @@ async function main() {
       groups.get(key).push(b.id);
     }
 
-    // Write back each group
     for (const [key, ids] of groups) {
       const [points, correct, streak] = key.split(",").map(Number);
       const payload = {
@@ -106,13 +98,13 @@ async function main() {
         accuracy: parseFloat((games.length > 0 ? correct / games.length : 0).toFixed(6)),
         max_points: points + remainingPts,
         perfect_streak: streak,
-        rank: null, // computed separately
+        rank: null,
       };
 
       for (let i = 0; i < ids.length; i += WRITE_CHUNK) {
         const chunk = ids.slice(i, i + WRITE_CHUNK);
         const { error: wErr } = await supabase
-          .from("brackets")
+          .from("w_brackets")
           .update(payload)
           .in("id", chunk);
         if (wErr) writeErrors++;
@@ -130,9 +122,9 @@ async function main() {
   const totalTime = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`\n  ✓ Scoring complete (${totalTime}s, ${writeErrors} write errors)\n`);
 
-  await supabase.from("scoring_log").delete().gte("id", 0);
+  await supabase.from("w_scoring_log").delete().gte("id", 0);
   for (const g of games) {
-    await supabase.from("scoring_log").insert({
+    await supabase.from("w_scoring_log").insert({
       game_idx: g.game_idx,
       winner_id: g.winner_id,
       brackets_scored: total,
@@ -141,28 +133,18 @@ async function main() {
   }
   console.log(`  ✓ Scoring log updated (${games.length} games)`);
 
-  // ── 4. Compute ranks via RPC ──────────────────────────────────────
   console.log("Computing ranks...");
-  const { data: groups, error: grpErr } = await supabase.rpc("get_score_groups");
-  if (grpErr) {
-      console.log(`  RPC failed: ${grpErr.message}`);
+  const { error: rankErr } = await supabase.rpc("w_update_ranks");
+  if (rankErr) {
+    console.log(`  RPC failed: ${rankErr.message}`);
+    console.log("  → Run this in Supabase SQL Editor:");
+    console.log("    SET statement_timeout = '600s'; SELECT w_update_ranks();");
   } else {
-      let rank = 1;
-      for (const g of groups) {
-          const { error: updErr } = await supabase
-              .from("brackets")
-              .update({ rank })
-              .eq("total_points", g.total_points)
-              .eq("correct_picks", g.correct_picks);
-          if (updErr) console.log(`  Rank update error for ${g.total_points}/${g.correct_picks}: ${updErr.message}`);
-          rank += g.cnt;
-      }
-      console.log(`  ✓ Ranks updated (${groups.length} groups)`);
+    console.log("  ✓ Ranks updated");
   }
 
-  // ── 5. Sanity check ──────────────────────────────────────────────
   const { data: top } = await supabase
-    .from("brackets")
+    .from("w_brackets")
     .select("total_points, correct_picks, games_decided, accuracy, max_points, perfect_streak, rank")
     .order("total_points", { ascending: false })
     .limit(1)
@@ -170,7 +152,7 @@ async function main() {
   console.log("\nTop bracket:", top);
 
   const { count: perfectCount } = await supabase
-    .from("brackets")
+    .from("w_brackets")
     .select("id", { count: "exact", head: true })
     .eq("correct_picks", games.length);
   console.log(`Perfect brackets: ${perfectCount}`);

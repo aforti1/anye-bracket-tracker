@@ -59,8 +59,7 @@ export default function LandingPage() {
             lineHeight: 1.6,
           }}
         >
-          ML-generated bracket portfolios tracking real tournament results in real time.
-          Choose a tournament to explore.
+          ML-generated bracket portfolios tracking real tournament results every quarter-hour.
         </p>
       </div>
 

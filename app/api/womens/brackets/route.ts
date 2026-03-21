@@ -20,7 +20,7 @@ export async function GET(req: NextRequest) {
   const max_upsets  = searchParams.get("max_upsets")  ?? null;
   const pickFiltersRaw = searchParams.get("pick_filters") ?? null;
 
-  const allowedSorts = ["bracket_hash","champion_name","total_points","correct_picks","accuracy","log_prob","upset_count","rank"];
+  const allowedSorts = ["bracket_hash","champion_name","total_points","correct_picks","accuracy","log_prob","upset_count","rank","max_points","perfect_streak"];
   const sortCol = allowedSorts.includes(sort) ? sort : "total_points";
   const sortAsc = order === "asc";
 
@@ -150,13 +150,6 @@ export async function GET(req: NextRequest) {
         }
       }
 
-      if (sort === "perfect_streak") {
-        enriched.sort((a: any, b: any) => {
-          const d = (a.perfect_streak ?? 0) - (b.perfect_streak ?? 0);
-          return order === "desc" ? -d : d;
-        });
-      }
-
       return NextResponse.json({
         brackets: enriched, total, page, per_page,
         total_pages: Math.ceil(total / per_page),
@@ -239,13 +232,6 @@ export async function GET(req: NextRequest) {
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   let enriched = (data ?? []).map(enrichBracket);
-
-  if (sort === "perfect_streak") {
-    enriched.sort((a: any, b: any) => {
-      const d = (a.perfect_streak ?? 0) - (b.perfect_streak ?? 0);
-      return order === "desc" ? -d : d;
-    });
-  }
 
   return NextResponse.json({
     brackets: enriched, total, page, per_page, total_pages,
