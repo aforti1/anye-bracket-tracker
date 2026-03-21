@@ -11,6 +11,8 @@ const ROUND_LABELS: Record<Round, string> = {
 const REGION_COLOR: Record<string, string> = {
   East: "#3b82f6", West: "#a855f7",
   Midwest: "#f97316", South: "#22c55e",
+  "Region 1": "#a855f7", "Region 2": "#f97316",
+  "Region 3": "#22c55e", "Region 4": "#3b82f6",
 };
 
 const REGION_ROUNDS: Round[] = ["round_64", "round_32", "sweet_16", "elite_8"];
@@ -26,16 +28,37 @@ function getStatus(pick: PickDetail, liveSet: Set<number>): Status {
 
 const YELLOW = "#facc15";
 
-// FIX: Added liveGamesUrl prop — defaults to men's endpoint
+// Region layout: which data region goes in which visual position, with optional display name
+export interface RegionSlot {
+  dataRegion: string;   // actual region name in the data (e.g. "West")
+  displayName: string;  // what to show in the UI (e.g. "Region 1")
+}
+
+export interface RegionLayout {
+  topLeft: RegionSlot;
+  bottomLeft: RegionSlot;
+  topRight: RegionSlot;
+  bottomRight: RegionSlot;
+}
+
+// Default men's layout
+const DEFAULT_LAYOUT: RegionLayout = {
+  topLeft:     { dataRegion: "East",    displayName: "East" },
+  bottomLeft:  { dataRegion: "South",   displayName: "South" },
+  topRight:    { dataRegion: "West",    displayName: "West" },
+  bottomRight: { dataRegion: "Midwest", displayName: "Midwest" },
+};
+
 interface Props {
   bracket: BracketDetail;
   liveGamesUrl?: string;
+  regionLayout?: RegionLayout;
 }
 
-export default function BracketView({ bracket, liveGamesUrl = "/api/live-games" }: Props) {
+export default function BracketView({ bracket, liveGamesUrl = "/api/live-games", regionLayout }: Props) {
+  const layout = regionLayout ?? DEFAULT_LAYOUT;
   const [liveSet, setLiveSet] = useState<Set<number>>(new Set());
 
-  // Fetch live game indices on mount — uses correct endpoint per gender
   useEffect(() => {
     fetch(liveGamesUrl, { cache: "no-store" })
       .then(r => r.json())
@@ -79,8 +102,18 @@ export default function BracketView({ bracket, liveGamesUrl = "/api/live-games" 
       <div style={{ overflowX: "auto", paddingBottom: 16 }}>
         <div style={{ display: "flex", alignItems: "stretch", minWidth: 1500, gap: 0 }}>
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-            <RegionBracket region="East"  byRound={byRegion.get("East")  ?? new Map()} liveSet={liveSet} side="left"  slotH={SLOT_H} />
-            <RegionBracket region="South" byRound={byRegion.get("South") ?? new Map()} liveSet={liveSet} side="left"  slotH={SLOT_H} />
+            <RegionBracket
+              region={layout.topLeft.dataRegion}
+              displayName={layout.topLeft.displayName}
+              byRound={byRegion.get(layout.topLeft.dataRegion) ?? new Map()}
+              liveSet={liveSet} side="left" slotH={SLOT_H}
+            />
+            <RegionBracket
+              region={layout.bottomLeft.dataRegion}
+              displayName={layout.bottomLeft.displayName}
+              byRound={byRegion.get(layout.bottomLeft.dataRegion) ?? new Map()}
+              liveSet={liveSet} side="left" slotH={SLOT_H}
+            />
           </div>
 
           <div style={{
@@ -120,8 +153,18 @@ export default function BracketView({ bracket, liveGamesUrl = "/api/live-games" 
           </div>
 
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
-            <RegionBracket region="West"    byRound={byRegion.get("West")    ?? new Map()} liveSet={liveSet} side="right" slotH={SLOT_H} />
-            <RegionBracket region="Midwest" byRound={byRegion.get("Midwest") ?? new Map()} liveSet={liveSet} side="right" slotH={SLOT_H} />
+            <RegionBracket
+              region={layout.topRight.dataRegion}
+              displayName={layout.topRight.displayName}
+              byRound={byRegion.get(layout.topRight.dataRegion) ?? new Map()}
+              liveSet={liveSet} side="right" slotH={SLOT_H}
+            />
+            <RegionBracket
+              region={layout.bottomRight.dataRegion}
+              displayName={layout.bottomRight.displayName}
+              byRound={byRegion.get(layout.bottomRight.dataRegion) ?? new Map()}
+              liveSet={liveSet} side="right" slotH={SLOT_H}
+            />
           </div>
         </div>
       </div>
@@ -129,11 +172,11 @@ export default function BracketView({ bracket, liveGamesUrl = "/api/live-games" 
   );
 }
 
-function RegionBracket({ region, byRound, liveSet, side, slotH }: {
-  region: string; byRound: Map<Round, PickDetail[]>;
+function RegionBracket({ region, displayName, byRound, liveSet, side, slotH }: {
+  region: string; displayName: string; byRound: Map<Round, PickDetail[]>;
   liveSet: Set<number>; side: "left"|"right"; slotH: number;
 }) {
-  const color  = REGION_COLOR[region] ?? "var(--accent)";
+  const color  = REGION_COLOR[displayName] ?? REGION_COLOR[region] ?? "var(--accent)";
   const rounds = side === "left" ? REGION_ROUNDS : [...REGION_ROUNDS].reverse();
 
   return (
@@ -143,7 +186,7 @@ function RegionBracket({ region, byRound, liveSet, side, slotH }: {
         letterSpacing: "0.04em", color,
         textAlign: side === "right" ? "right" : "left",
         paddingBottom: 6, marginBottom: 8, borderBottom: `2px solid ${color}44`,
-      }}>{region}</div>
+      }}>{displayName}</div>
       <div style={{ display: "flex", flexDirection: "row", gap: 12 }}>
         {rounds.map(round => (
           <RoundCol key={round} round={round} picks={byRound.get(round) ?? []} liveSet={liveSet} slotH={slotH} minW={140} />

@@ -1,12 +1,23 @@
 // app/womens/brackets/[hash]/page.tsx
 import { notFound } from "next/navigation";
 import BracketView from "@/components/BracketView";
+import type { RegionLayout } from "@/components/BracketView";
 import BackLink from "@/components/BackLink";
 import type { BracketDetail } from "@/lib/types";
 import { formatAccuracy } from "@/lib/scoring";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+// Women's bracket layout:
+// Top left: West → "Region 1"    Top right: Midwest → "Region 2"
+// Bottom left: East → "Region 4" Bottom right: South → "Region 3"
+const WOMENS_LAYOUT: RegionLayout = {
+  topLeft:     { dataRegion: "West",    displayName: "Region 1" },
+  bottomLeft:  { dataRegion: "East",    displayName: "Region 4" },
+  topRight:    { dataRegion: "Midwest", displayName: "Region 2" },
+  bottomRight: { dataRegion: "South",   displayName: "Region 3" },
+};
 
 function smartNum(n: number): string {
   if (n < 1000) return String(n);
@@ -46,7 +57,6 @@ export default async function WomensBracketPage({ params }: { params: Promise<{ 
     <main className="min-h-screen">
       <div style={{ borderBottom: "1px solid var(--border)", marginBottom: 32 }}>
         <div style={{ maxWidth: 1400, margin: "0 auto", padding: "20px 24px" }}>
-          {/* FIX: BackLink reads saved URL from sessionStorage to preserve filters */}
           <BackLink fallback="/womens" label="WOMEN'S LEADERBOARD" />
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 16, flexWrap: "wrap", gap: 16 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -64,8 +74,11 @@ export default async function WomensBracketPage({ params }: { params: Promise<{ 
         </div>
       </div>
       <div style={{ maxWidth: 1600, margin: "0 auto", padding: "0 16px 48px" }}>
-        {/* FIX: Pass women's live-games endpoint */}
-        <BracketView bracket={bracket} liveGamesUrl="/api/womens/live-games" />
+        <BracketView
+          bracket={bracket}
+          liveGamesUrl="/api/womens/live-games"
+          regionLayout={WOMENS_LAYOUT}
+        />
       </div>
     </main>
   );

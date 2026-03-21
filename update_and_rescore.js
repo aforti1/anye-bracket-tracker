@@ -368,7 +368,7 @@ async function scoreNewGames(gender, newGames) {
   const w = gender === "womens";
   const label = w ? "WOMEN'S" : "MEN'S";
   const rpcName = w ? "w_score_game_range" : "score_game_range";
-  const BATCH = 50000;
+  const BATCH = 25000;
   const tbl = {
     brackets: w ? "w_brackets" : "brackets",
     scoring_log: w ? "w_scoring_log" : "scoring_log",
@@ -440,7 +440,7 @@ async function fullRescore(gender) {
   const w = gender === "womens";
   const label = w ? "WOMEN'S" : "MEN'S";
   const rpcName = w ? "rescore_batch_w" : "rescore_batch";
-  const BATCH = 50000;
+  const BATCH = 25000;
   const tbl = {
     brackets: w ? "w_brackets" : "brackets",
     results: w ? "w_game_results" : "game_results",

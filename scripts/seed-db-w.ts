@@ -27,7 +27,7 @@ import * as parquet from "@dsnp/parquetjs";
 // ---------------------------------------------------------------------------
 const SEASON = parseInt(process.argv.find((a) => a.startsWith("--season="))?.split("=")[1] ?? "2026");
 const DRY_RUN = process.argv.includes("--dry-run");
-const BATCH_SIZE = 5000;
+const BATCH_SIZE = 2000;
 const DATA_DIR = path.join(__dirname, "..", "data");
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -96,7 +96,7 @@ async function batchInsert(
         throw error;
       }
 
-      if (i + BATCH_SIZE < total) await sleep(50);
+      if (i + BATCH_SIZE < total) await sleep(200);
     }
 
     inserted += batch.length;
