@@ -4,7 +4,7 @@ import { supabase } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-const ALLOWED_SORTS = ["bracket_hash","champion_name","total_points","correct_picks","accuracy","log_prob","upset_count","rank"];
+const ALLOWED_SORTS = ["bracket_hash","champion_name","total_points","correct_picks","accuracy","log_prob","upset_count","rank","max_points","perfect_streak"];
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
