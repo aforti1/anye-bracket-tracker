@@ -1,9 +1,9 @@
 // app/womens/brackets/[hash]/page.tsx
 import { notFound } from "next/navigation";
 import BracketView from "@/components/BracketView";
+import BackLink from "@/components/BackLink";
 import type { BracketDetail } from "@/lib/types";
 import { formatAccuracy } from "@/lib/scoring";
-import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -46,18 +46,8 @@ export default async function WomensBracketPage({ params }: { params: Promise<{ 
     <main className="min-h-screen">
       <div style={{ borderBottom: "1px solid var(--border)", marginBottom: 32 }}>
         <div style={{ maxWidth: 1400, margin: "0 auto", padding: "20px 24px" }}>
-          <Link
-            href="/womens"
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 12,
-              color: "var(--text-muted)",
-              textDecoration: "none",
-              letterSpacing: "0.06em",
-            }}
-          >
-            ← WOMEN'S LEADERBOARD
-          </Link>
+          {/* FIX: BackLink reads saved URL from sessionStorage to preserve filters */}
+          <BackLink fallback="/womens" label="WOMEN'S LEADERBOARD" />
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 16, flexWrap: "wrap", gap: 16 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <h1 style={{ fontFamily: "var(--font-display)", fontSize: "clamp(28px, 4vw, 48px)", fontWeight: 800, letterSpacing: "-0.01em", color: "#a855f7" }}>{bracket.bracket_hash}</h1>
@@ -74,7 +64,8 @@ export default async function WomensBracketPage({ params }: { params: Promise<{ 
         </div>
       </div>
       <div style={{ maxWidth: 1600, margin: "0 auto", padding: "0 16px 48px" }}>
-        <BracketView bracket={bracket} />
+        {/* FIX: Pass women's live-games endpoint */}
+        <BracketView bracket={bracket} liveGamesUrl="/api/womens/live-games" />
       </div>
     </main>
   );

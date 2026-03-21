@@ -2,6 +2,9 @@
 //
 // Women's tournament auto-scraper with batched scoring.
 // Uses w_score_game_range to process 50K rows at a time.
+//
+// FIX: matchToNode now resolves R32+ participants from game_results
+// FIX: Orphan reconciliation checks if brackets are already scored (idempotent)
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceClient } from "@/lib/db";
@@ -119,9 +122,11 @@ function resolveESPN(name: string, map: Map<string, number>): number | undefined
   return undefined;
 }
 
+// FIX: matchToNode now accepts winnerByIdx to resolve R32+ participants
 function matchToNode(
   comp: ESPNGame["competitions"][0], nodes: any[],
   dbNameToId: Map<string, number>, recorded: Set<number>, skipRecorded: boolean,
+  winnerByIdx: Map<number, number>,
 ): { node: any; teamAId: number; teamBId: number } | null {
   const t = comp.competitors;
   if (t.length < 2) return null;
@@ -130,7 +135,15 @@ function matchToNode(
   if (!id1 || !id2) return null;
   for (const node of nodes) {
     if (skipRecorded && recorded.has(node.game_idx)) continue;
-    const s = new Set([node.team_a_id, node.team_b_id].filter(Boolean));
+
+    // For R64, use fixed team IDs; for later rounds, resolve from game results
+    let teamA = node.team_a_id ?? null;
+    let teamB = node.team_b_id ?? null;
+    if (!teamA && node.source_a != null) teamA = winnerByIdx.get(node.source_a) ?? null;
+    if (!teamB && node.source_b != null) teamB = winnerByIdx.get(node.source_b) ?? null;
+    if (!teamA || !teamB) continue; // feeder games not yet decided
+
+    const s = new Set([teamA, teamB]);
     if (s.has(id1) && s.has(id2)) return { node, teamAId: id1, teamBId: id2 };
   }
   return null;
@@ -170,10 +183,14 @@ async function scoreBatched(
 
   debugLog.push(`W_SCORED game_idx ${gameIdx}: ${totalAffected} rows, ${batchErrors} errors`);
 
-  await supabase.from("w_scoring_log").insert({
+  // Log to scoring_log — CHECK for errors instead of fire-and-forget
+  const { error: logErr } = await supabase.from("w_scoring_log").insert({
     game_idx: gameIdx, winner_id: winnerId,
     brackets_scored: totalAffected, scored_at: new Date().toISOString(),
   });
+  if (logErr) {
+    debugLog.push(`W_SCORING_LOG INSERT FAIL game_idx ${gameIdx}: ${logErr.message}`);
+  }
 
   return batchErrors === 0;
 }
@@ -208,7 +225,7 @@ export async function GET(req: NextRequest) {
       await Promise.all([
         fetch(ESPN_URL, { next: { revalidate: 0 } }),
         supabase.from("w_game_results").select("game_idx, winner_id"),
-        supabase.from("w_game_nodes").select("game_idx, round, team_a_id, team_b_id"),
+        supabase.from("w_game_nodes").select("game_idx, round, region, team_a_id, team_b_id, source_a, source_b"),
         supabase.from("w_tournament_teams").select("team_id, name, seed"),
         supabase.from("w_scoring_log").select("game_idx"),
         supabase.from("w_brackets").select("id").order("id", { ascending: true }).limit(1).single(),
@@ -228,21 +245,46 @@ export async function GET(req: NextRequest) {
     const dbNameToId = new Map(teams.map((t: any) => [t.name, t.team_id]));
     const scoredSet = new Set((scoredLogRes.data ?? []).map((r: any) => r.game_idx));
 
+    // FIX: Build winner map for resolving later-round matchups
+    const winnerByIdx = new Map<number, number>(
+      existingResults.map((r: any) => [r.game_idx, r.winner_id])
+    );
+
     let newResults = 0;
     const liveGameIdxs: number[] = [];
     const debugLog: string[] = [];
 
     debugLog.push(`W ID range: ${minId}–${maxId}, batch size: ${BATCH_SIZE}`);
 
-    // ── STEP 1: Reconcile orphaned games ──
+    // ── STEP 1: Reconcile orphaned games (IDEMPOTENT) ──
     const orphaned = existingResults.filter((r: any) => !scoredSet.has(r.game_idx));
     if (orphaned.length > 0) {
-      debugLog.push(`W_RECONCILE: ${orphaned.length} orphaned games`);
-      for (const orphan of orphaned) {
-        const round = nodeRoundMap.get(orphan.game_idx) as string;
-        const pts = ROUND_POINTS[round as Round] ?? 0;
-        if (await scoreBatched(supabase, orphan.game_idx, orphan.winner_id, pts, minId, maxId, debugLog)) {
-          newResults++;
+      const { data: sampleBracket } = await supabase
+        .from("w_brackets")
+        .select("games_decided")
+        .limit(1)
+        .single();
+      const bracketsAlreadyScored = sampleBracket
+        && sampleBracket.games_decided >= existingResults.length;
+
+      if (bracketsAlreadyScored) {
+        debugLog.push(`W_RECONCILE: ${orphaned.length} orphaned games (brackets already scored, fixing scoring_log only)`);
+        for (const orphan of orphaned) {
+          const { error: logErr } = await supabase.from("w_scoring_log").insert({
+            game_idx: orphan.game_idx, winner_id: orphan.winner_id,
+            brackets_scored: 0, scored_at: new Date().toISOString(),
+          });
+          if (logErr) debugLog.push(`W_SCORING_LOG FIX FAIL game_idx ${orphan.game_idx}: ${logErr.message}`);
+          else debugLog.push(`W_SCORING_LOG FIXED game_idx ${orphan.game_idx}`);
+        }
+      } else {
+        debugLog.push(`W_RECONCILE: ${orphaned.length} orphaned games (scoring brackets)`);
+        for (const orphan of orphaned) {
+          const round = nodeRoundMap.get(orphan.game_idx) as string;
+          const pts = ROUND_POINTS[round as Round] ?? 0;
+          if (await scoreBatched(supabase, orphan.game_idx, orphan.winner_id, pts, minId, maxId, debugLog)) {
+            newResults++;
+          }
         }
       }
     }
@@ -261,7 +303,7 @@ export async function GET(req: NextRequest) {
         const winnerName = winnerObj.team.displayName;
         const winnerId = resolveESPN(winnerName, dbNameToId);
         if (!winnerId) { debugLog.push(`W_SKIP ${winnerName}: not in ESPN_TO_DB map`); continue; }
-        const match = matchToNode(comp, nodes, dbNameToId, recorded, true);
+        const match = matchToNode(comp, nodes, dbNameToId, recorded, true, winnerByIdx);
         if (!match) { debugLog.push(`W_SKIP ${espnTeam1} vs ${espnTeam2}: already recorded or no match`); continue; }
 
         const roundStr = parseRoundFromNotes(comp.notes ?? []);
@@ -278,13 +320,15 @@ export async function GET(req: NextRequest) {
         const roundPts = ROUND_POINTS[round as Round] ?? 0;
         if (await scoreBatched(supabase, match.node.game_idx, winnerId, roundPts, minId, maxId, debugLog)) {
           recorded.add(match.node.game_idx);
+          // FIX: Update winnerByIdx so later-round games in this same run can resolve
+          winnerByIdx.set(match.node.game_idx, winnerId);
           newResults++;
         }
         continue;
       }
 
       if (event.status.type.state === "in") {
-        const match = matchToNode(comp, nodes, dbNameToId, recorded, true);
+        const match = matchToNode(comp, nodes, dbNameToId, recorded, true, winnerByIdx);
         if (match) {
           liveGameIdxs.push(match.node.game_idx);
           debugLog.push(`W_LIVE game_idx ${match.node.game_idx}: ${espnTeam1} vs ${espnTeam2}`);

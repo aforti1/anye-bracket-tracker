@@ -26,21 +26,25 @@ function getStatus(pick: PickDetail, liveSet: Set<number>): Status {
 
 const YELLOW = "#facc15";
 
-interface Props { bracket: BracketDetail; }
+// FIX: Added liveGamesUrl prop — defaults to men's endpoint
+interface Props {
+  bracket: BracketDetail;
+  liveGamesUrl?: string;
+}
 
-export default function BracketView({ bracket }: Props) {
+export default function BracketView({ bracket, liveGamesUrl = "/api/live-games" }: Props) {
   const [liveSet, setLiveSet] = useState<Set<number>>(new Set());
 
-  // Fetch live game indices on mount
+  // Fetch live game indices on mount — uses correct endpoint per gender
   useEffect(() => {
-    fetch("/api/live-games", { cache: "no-store" })
+    fetch(liveGamesUrl, { cache: "no-store" })
       .then(r => r.json())
       .then(data => {
         const idxs: number[] = data.live_game_idxs ?? [];
         setLiveSet(new Set(idxs));
       })
       .catch(() => {});
-  }, []);
+  }, [liveGamesUrl]);
 
   const byRegion = useMemo(() => {
     const map = new Map<string, Map<Round, PickDetail[]>>();

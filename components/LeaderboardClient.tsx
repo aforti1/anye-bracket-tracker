@@ -338,6 +338,13 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions, 
     setPage(1);
   };
 
+  // FIX: Save current URL to sessionStorage before navigating to a bracket
+  // so BackLink can restore it (preserving filters/sort/page)
+  const navigateToBracket = (hash: string) => {
+    try { sessionStorage.setItem("leaderboard_return_url", window.location.href); } catch {}
+    router.push(`${routeBase}/brackets/${hash}`);
+  };
+
   const numStyle: React.CSSProperties = {
     fontFamily: "var(--font-mono)", fontSize: 13, fontWeight: 500, color: "var(--text-primary)",
   };
@@ -430,7 +437,7 @@ function LeaderboardInner({ summary: serverSummary, champions: serverChampions, 
               ) : (
                 brackets.map((b, idx) => (
                   <tr key={`${b.id}-${idx}`}
-                    onClick={() => router.push(`${routeBase}/brackets/${b.bracket_hash}`)}
+                    onClick={() => navigateToBracket(b.bracket_hash)}
                     style={{ borderBottom: "1px solid var(--border-subtle)", cursor: "pointer", transition: "background 0.1s" }}
                     onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-elevated)")}
                     onMouseLeave={e => (e.currentTarget.style.background = "transparent")} className="fade-in">
