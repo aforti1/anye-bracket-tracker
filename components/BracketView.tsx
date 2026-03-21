@@ -53,9 +53,10 @@ interface Props {
   bracket: BracketDetail;
   liveGamesUrl?: string;
   regionLayout?: RegionLayout;
+  swapFinalFour?: boolean;
 }
 
-export default function BracketView({ bracket, liveGamesUrl = "/api/live-games", regionLayout }: Props) {
+export default function BracketView({ bracket, liveGamesUrl = "/api/live-games", regionLayout, swapFinalFour }: Props) {
   const layout = regionLayout ?? DEFAULT_LAYOUT;
   const [liveSet, setLiveSet] = useState<Set<number>>(new Set());
 
@@ -82,6 +83,8 @@ export default function BracketView({ bracket, liveGamesUrl = "/api/live-games",
 
   const finalFour    = bracket.pick_details.filter(p => p.round === "final_four");
   const championship = bracket.pick_details.find(p => p.round === "championship") ?? null;
+  const ff0 = swapFinalFour ? finalFour[1] : finalFour[0];
+  const ff1 = swapFinalFour ? finalFour[0] : finalFour[1];
 
   const correct  = bracket.correct_picks;
   const decided  = bracket.games_decided;
@@ -125,7 +128,7 @@ export default function BracketView({ bracket, liveGamesUrl = "/api/live-games",
               letterSpacing: "0.08em", color: "var(--accent)",
               textAlign: "center", marginBottom: 6, textTransform: "uppercase",
             }}>Final Four</div>
-            {finalFour[0] && <MatchupCard pick={finalFour[0]} liveSet={liveSet} />}
+            {ff0 && <MatchupCard pick={ff0} liveSet={liveSet} />}
           </div>
 
           <div style={{
@@ -149,7 +152,7 @@ export default function BracketView({ bracket, liveGamesUrl = "/api/live-games",
               letterSpacing: "0.08em", color: "var(--accent)",
               textAlign: "center", marginBottom: 6, textTransform: "uppercase",
             }}>Final Four</div>
-            {finalFour[1] && <MatchupCard pick={finalFour[1]} liveSet={liveSet} />}
+            {ff1 && <MatchupCard pick={ff1} liveSet={liveSet} />}
           </div>
 
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>

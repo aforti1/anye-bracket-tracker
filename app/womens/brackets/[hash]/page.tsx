@@ -78,6 +78,7 @@ export default async function WomensBracketPage({ params }: { params: Promise<{ 
           bracket={bracket}
           liveGamesUrl="/api/womens/live-games"
           regionLayout={WOMENS_LAYOUT}
+          swapFinalFour
         />
       </div>
     </main>
