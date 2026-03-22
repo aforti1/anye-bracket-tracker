@@ -9,6 +9,24 @@ const ROUND_POINTS: Record<string, number> = {
 
 export const dynamic = "force-dynamic";
 
+// Tiebreaker-aware sort comparator
+function tiebreakSort(a: any, b: any, sk: string, sortAsc: boolean): number {
+  const va = a[sk] ?? 0;
+  const vb = b[sk] ?? 0;
+  if (typeof va === "string" && typeof vb === "string") {
+    const cmp = va.localeCompare(vb);
+    if (cmp !== 0) return sortAsc ? cmp : -cmp;
+  } else {
+    if (va !== vb) return sortAsc ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
+  }
+  // Tiebreaker: correct_picks desc, then total_points desc
+  const ca = a.correct_picks ?? 0, cb = b.correct_picks ?? 0;
+  if (ca !== cb) return cb - ca;
+  const pa = a.total_points ?? 0, pb = b.total_points ?? 0;
+  if (pa !== pb) return pb - pa;
+  return 0;
+}
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const page        = Math.max(1, parseInt(searchParams.get("page") ?? "1"));
@@ -86,6 +104,16 @@ export async function GET(req: NextRequest) {
     }
     const { picks: _, ...rest } = b;
     return { ...rest, max_points, perfect_streak };
+  }
+
+  // Helper: apply secondary sort to a Supabase query
+  function applySort(query: any) {
+    query = query.order(sortCol, { ascending: sortAsc });
+    // Secondary sort so points matches rank ordering
+    if (sortCol === "total_points" || sortCol === "rank" || sortCol === "max_points") {
+      query = query.order("correct_picks", { ascending: false });
+    }
+    return query;
   }
 
   // ── PICK FILTER PATH (uses SQL RPC) ──
@@ -186,8 +214,11 @@ export async function GET(req: NextRequest) {
   const selectFields = "id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank";
 
   let query = hasAnyFilter
-    ? supabase.from("brackets").select(selectFields, { count: "exact" }).order(sortCol, { ascending: sortAsc })
-    : supabase.from("brackets").select(selectFields).order(sortCol, { ascending: sortAsc });
+    ? supabase.from("brackets").select(selectFields, { count: "exact" })
+    : supabase.from("brackets").select(selectFields);
+
+  // Apply primary + secondary sort
+  query = applySort(query);
 
   if (champion_id) query = query.eq("champion_id", parseInt(champion_id));
   if (min_upsets)  query = query.gte("upset_count", parseInt(min_upsets));
@@ -290,13 +321,7 @@ async function jsPickFilterFallback(
   let enriched = allMatching.map(enrichBracket);
 
   const sk = sort === "perfect_streak" ? "perfect_streak" : (sort === "max_points" ? "max_points" : sortCol);
-  enriched.sort((a: any, b: any) => {
-    const va = a[sk] ?? 0;
-    const vb = b[sk] ?? 0;
-    if (typeof va === "string" && typeof vb === "string")
-      return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
-    return sortAsc ? (va > vb ? 1 : va < vb ? -1 : 0) : (va < vb ? 1 : va > vb ? -1 : 0);
-  });
+  enriched.sort((a: any, b: any) => tiebreakSort(a, b, sk, sortAsc));
 
   const pageStart = (page - 1) * per_page;
   const pageRows = enriched.slice(pageStart, pageStart + per_page);
@@ -306,4 +331,21 @@ async function jsPickFilterFallback(
     total_pages: Math.ceil(total / per_page),
     games_complete, tournament_live: games_complete > 0 && games_complete < 63,
   });
+}
+
+// Tiebreaker-aware sort comparator (module-level for fallback access)
+function tiebreakSort(a: any, b: any, sk: string, sortAsc: boolean): number {
+  const va = a[sk] ?? 0;
+  const vb = b[sk] ?? 0;
+  if (typeof va === "string" && typeof vb === "string") {
+    const cmp = va.localeCompare(vb);
+    if (cmp !== 0) return sortAsc ? cmp : -cmp;
+  } else {
+    if (va !== vb) return sortAsc ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
+  }
+  const ca = a.correct_picks ?? 0, cb = b.correct_picks ?? 0;
+  if (ca !== cb) return cb - ca;
+  const pa = a.total_points ?? 0, pb = b.total_points ?? 0;
+  if (pa !== pb) return pb - pa;
+  return 0;
 }

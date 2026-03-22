@@ -361,6 +361,139 @@ async function computeRanks(gender) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// COMPUTE DERIVED FIELDS (max_points, perfect_streak)
+// Runs after scoring so Supabase can sort on these columns globally.
+// ═══════════════════════════════════════════════════════════════════════
+
+async function computeDerivedFields(gender) {
+  const w = gender === "womens";
+  const tbl = {
+    brackets: w ? "w_brackets" : "brackets",
+    results:  w ? "w_game_results" : "game_results",
+    nodes:    w ? "w_game_nodes"   : "game_nodes",
+  };
+
+  console.log(`  Computing max_points & perfect_streak...`);
+  const t0 = Date.now();
+
+  // Load game results ordered by completion time (for streak)
+  const { data: results } = await supabase
+    .from(tbl.results)
+    .select("game_idx, winner_id, completed_at")
+    .order("completed_at", { ascending: true });
+
+  // Load game nodes
+  const { data: nodes } = await supabase
+    .from(tbl.nodes)
+    .select("game_idx, round, team_a_id, team_b_id, source_a, source_b");
+
+  if (!results || !nodes || results.length === 0) {
+    console.log(`    No game results — skipping derived fields.`);
+    return;
+  }
+
+  const nodeMap = new Map(nodes.map(n => [n.game_idx, n]));
+  const winnerByIdx = new Map(results.map(r => [r.game_idx, r.winner_id]));
+  const decidedSet = new Set(results.map(r => r.game_idx));
+
+  // Games ordered by completion time, most recent first (for streak)
+  const gamesByTimeDesc = [...results].reverse();
+
+  // Build eliminated set: teams that lost a decided game
+  const eliminated = new Set();
+  for (const r of results) {
+    const node = nodeMap.get(r.game_idx);
+    if (!node) continue;
+    const winner = r.winner_id;
+    const participants = [];
+    if (node.round === "round_64") {
+      if (node.team_a_id) participants.push(node.team_a_id);
+      if (node.team_b_id) participants.push(node.team_b_id);
+    } else {
+      if (node.source_a != null && winnerByIdx.has(node.source_a))
+        participants.push(winnerByIdx.get(node.source_a));
+      if (node.source_b != null && winnerByIdx.has(node.source_b))
+        participants.push(winnerByIdx.get(node.source_b));
+    }
+    for (const p of participants) {
+      if (p !== winner) eliminated.add(p);
+    }
+  }
+
+  // Undecided games with their round points
+  const undecidedGames = nodes
+    .filter(n => !decidedSet.has(n.game_idx))
+    .map(n => ({ game_idx: n.game_idx, pts: ROUND_POINTS[n.round] || 0 }));
+
+  // Get ID range
+  const { data: lo } = await supabase.from(tbl.brackets).select("id").order("id", { ascending: true }).limit(1).single();
+  const { data: hi } = await supabase.from(tbl.brackets).select("id").order("id", { ascending: false }).limit(1).single();
+  if (!lo || !hi) return;
+
+  let processed = 0;
+  let writeErrors = 0;
+
+  for (let start = lo.id; start <= hi.id; start += FETCH_BATCH) {
+    const end = Math.min(start + FETCH_BATCH - 1, hi.id);
+
+    const { data: brackets } = await supabase
+      .from(tbl.brackets)
+      .select("id, picks, total_points")
+      .gte("id", start)
+      .lte("id", end);
+
+    if (!brackets || brackets.length === 0) continue;
+
+    // Group by (max_points, perfect_streak) for efficient writes
+    const groups = new Map();
+
+    for (const b of brackets) {
+      const picks = b.picks;
+
+      // Perfect streak: consecutive correct from most recent game backward (by real time)
+      let streak = 0;
+      for (const g of gamesByTimeDesc) {
+        if (picks[g.game_idx] === g.winner_id) streak++;
+        else break;
+      }
+
+      // Max points: current points + possible future points for non-eliminated picks
+      let max_points = b.total_points;
+      for (const ug of undecidedGames) {
+        const picked = picks[ug.game_idx];
+        if (picked && !eliminated.has(picked)) {
+          max_points += ug.pts;
+        }
+      }
+
+      const key = `${max_points},${streak}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(b.id);
+    }
+
+    // Write back each group
+    for (const [key, ids] of groups) {
+      const [mp, ps] = key.split(",").map(Number);
+      for (let i = 0; i < ids.length; i += WRITE_CHUNK) {
+        const chunk = ids.slice(i, i + WRITE_CHUNK);
+        const { error } = await supabase
+          .from(tbl.brackets)
+          .update({ max_points: mp, perfect_streak: ps })
+          .in("id", chunk);
+        if (error) writeErrors++;
+      }
+    }
+
+    processed += brackets.length;
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
+    process.stdout.write(`\r    ${processed.toLocaleString()} updated [${elapsed}s]`);
+  }
+
+  const totalTime = ((Date.now() - t0) / 1000).toFixed(1);
+  console.log(`\n    ✓ Derived fields updated in ${totalTime}s (${writeErrors} write errors)`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // SCORE NEW GAMES (batched RPCs — each batch ~1s inside Postgres)
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -368,7 +501,7 @@ async function scoreNewGames(gender, newGames) {
   const w = gender === "womens";
   const label = w ? "WOMEN'S" : "MEN'S";
   const rpcName = w ? "w_score_game_range" : "score_game_range";
-  const BATCH = 25000;
+  const BATCH = 5000;
   const tbl = {
     brackets: w ? "w_brackets" : "brackets",
     scoring_log: w ? "w_scoring_log" : "scoring_log",
@@ -423,9 +556,12 @@ async function scoreNewGames(gender, newGames) {
   // Update ranks
   await computeRanks(gender);
 
+  // Compute derived fields (max_points, perfect_streak)
+  await computeDerivedFields(gender);
+
   // Sanity check
   const { data: top } = await supabase.from(tbl.brackets)
-    .select("total_points, correct_picks, games_decided, accuracy, rank")
+    .select("total_points, correct_picks, games_decided, accuracy, max_points, perfect_streak, rank")
     .order("total_points", { ascending: false }).limit(1).single();
   console.log(`  Top bracket:`, top);
 
@@ -439,8 +575,8 @@ async function scoreNewGames(gender, newGames) {
 async function fullRescore(gender) {
   const w = gender === "womens";
   const label = w ? "WOMEN'S" : "MEN'S";
-  const rpcName = w ? "rescore_batch_w" : "rescore_batch";
-  const BATCH = 25000;
+  const rpcName = w ? "w_score_all_games_batch" : "score_all_games_batch";
+  const BATCH = 5000;
   const tbl = {
     brackets: w ? "w_brackets" : "brackets",
     results: w ? "w_game_results" : "game_results",
@@ -496,8 +632,11 @@ async function fullRescore(gender) {
   // Ranks
   await computeRanks(gender);
 
+  // Compute derived fields (max_points, perfect_streak)
+  await computeDerivedFields(gender);
+
   const { data: top } = await supabase.from(tbl.brackets)
-    .select("total_points, correct_picks, games_decided, accuracy, rank")
+    .select("total_points, correct_picks, games_decided, accuracy, max_points, perfect_streak, rank")
     .order("total_points", { ascending: false }).limit(1).single();
   console.log(`\n  Top bracket:`, top);
 }
