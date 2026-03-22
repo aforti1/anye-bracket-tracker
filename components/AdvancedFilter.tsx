@@ -192,11 +192,16 @@ export default function AdvancedFilter({ pickFilters, onApply, onClose, apiBase 
     return m;
   }, [nodes]);
 
+  const isWomens = apiBase.includes("womens");
+  const WOMENS_REGION_ORDER = ["West", "East", "Midwest", "South"];
+  const WOMENS_DISPLAY_NAMES: Record<string, string> = { West: "Region 1", Midwest: "Region 2", South: "Region 3", East: "Region 4" };
+
   const regionOrder = useMemo(() => {
+    if (isWomens) return WOMENS_REGION_ORDER;
     const r: string[] = [];
     for (const n of nodes) if (n.round === "round_64" && !r.includes(n.region)) r.push(n.region);
     return r;
-  }, [nodes]);
+  }, [nodes, isWomens]);
 
   useEffect(() => {
     const h = (e: MouseEvent) => { if (modalRef.current && !modalRef.current.contains(e.target as Node)) { setActiveSlot(null); setSelectedTeam(null); } };
@@ -261,7 +266,7 @@ export default function AdvancedFilter({ pickFilters, onApply, onClose, apiBase 
     const color = REGION_COLOR[region] ?? "var(--text-muted)";
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <div style={{ fontFamily: "var(--font-display)", fontSize: 12, fontWeight: 700, color, letterSpacing: "0.06em", textAlign: side === "left" ? "left" : "right", paddingBottom: 2 }}>{region}</div>
+        <div style={{ fontFamily: "var(--font-display)", fontSize: 12, fontWeight: 700, color, letterSpacing: "0.06em", textAlign: side === "left" ? "left" : "right", paddingBottom: 2 }}>{isWomens ? (WOMENS_DISPLAY_NAMES[region] ?? region) : region}</div>
         <div style={{ display: "flex", gap: COL_GAP, flexDirection: "row" }}>
           {rounds.map(round => {
             const games = byRound.get(round) ?? [];
@@ -278,6 +283,8 @@ export default function AdvancedFilter({ pickFilters, onApply, onClose, apiBase 
   const leftRegions = regionOrder.slice(0, 2);
   const rightRegions = regionOrder.slice(2, 4);
   const ffGames = nodes.filter(n => n.round === "final_four").sort((a, b) => a.slot - b.slot);
+  const ffTop = isWomens ? ffGames[1] : ffGames[0];
+  const ffBottom = isWomens ? ffGames[0] : ffGames[1];
   const champGame = nodes.find(n => n.round === "championship");
 
   return (
@@ -294,13 +301,13 @@ export default function AdvancedFilter({ pickFilters, onApply, onClose, apiBase 
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>{leftRegions.map(r => <div key={r}>{renderRegion(r, "left")}</div>)}</div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: ROW_GAP, justifyContent: "center" }}>
             <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>FF</div>
-            {ffGames[0] && renderSlotButton(ffGames[0])}
+            {ffTop && renderSlotButton(ffTop)}
             <div style={{ height: 12 }} />
             <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em", textTransform: "uppercase" }}>CH</div>
             {champGame && renderSlotButton(champGame)}
             <div style={{ height: 12 }} />
             <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em", textTransform: "uppercase" }}>FF</div>
-            {ffGames[1] && renderSlotButton(ffGames[1])}
+            {ffBottom && renderSlotButton(ffBottom)}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>{rightRegions.map(r => <div key={r}>{renderRegion(r, "right")}</div>)}</div>
         </div>
