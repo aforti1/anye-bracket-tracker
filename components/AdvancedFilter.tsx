@@ -300,14 +300,20 @@ export default function AdvancedFilter({ pickFilters, onApply, onClose, apiBase 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16, overflowX: "auto", padding: "8px 0" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>{leftRegions.map(r => <div key={r}>{renderRegion(r, "left")}</div>)}</div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: ROW_GAP, justifyContent: "center" }}>
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>FF</div>
-            {ffTop && renderSlotButton(ffTop)}
-            <div style={{ height: 12 }} />
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em", textTransform: "uppercase" }}>CH</div>
-            {champGame && renderSlotButton(champGame)}
-            <div style={{ height: 12 }} />
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em", textTransform: "uppercase" }}>FF</div>
-            {ffBottom && renderSlotButton(ffBottom)}
+            <div style={{ display: "flex", alignItems: "center", gap: 12, justifyContent: "center" }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em", textTransform: "uppercase" }}>FF</div>
+                {ffTop && renderSlotButton(ffTop)}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em", textTransform: "uppercase" }}>CH</div>
+                {champGame && renderSlotButton(champGame)}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent)", letterSpacing: "0.1em", textTransform: "uppercase" }}>FF</div>
+                {ffBottom && renderSlotButton(ffBottom)}
+              </div>
+            </div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>{rightRegions.map(r => <div key={r}>{renderRegion(r, "right")}</div>)}</div>
         </div>

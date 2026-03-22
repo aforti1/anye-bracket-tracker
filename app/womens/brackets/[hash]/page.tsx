@@ -23,6 +23,7 @@ function smartNum(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) {
     const k = n / 1000;
+    if (Math.round(k) >= 1000) return "1M";
     if (k >= 100) return `${Math.round(k)}K`;
     if (k >= 10) return `${parseFloat((Math.round(k * 10) / 10).toFixed(1))}K`;
     return `${parseFloat((Math.round(k * 100) / 100).toFixed(2))}K`;
