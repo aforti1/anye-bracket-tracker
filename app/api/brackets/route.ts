@@ -333,19 +333,4 @@ async function jsPickFilterFallback(
   });
 }
 
-// Tiebreaker-aware sort comparator (module-level for fallback access)
-function tiebreakSort(a: any, b: any, sk: string, sortAsc: boolean): number {
-  const va = a[sk] ?? 0;
-  const vb = b[sk] ?? 0;
-  if (typeof va === "string" && typeof vb === "string") {
-    const cmp = va.localeCompare(vb);
-    if (cmp !== 0) return sortAsc ? cmp : -cmp;
-  } else {
-    if (va !== vb) return sortAsc ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
-  }
-  const ca = a.correct_picks ?? 0, cb = b.correct_picks ?? 0;
-  if (ca !== cb) return cb - ca;
-  const pa = a.total_points ?? 0, pb = b.total_points ?? 0;
-  if (pa !== pb) return pb - pa;
-  return 0;
-}
+
