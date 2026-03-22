@@ -1,108 +1,100 @@
 // scheduler.js
 //
-// Unified scheduler for update_and_rescore.js.
-// Ticks at the GCD of both intervals. When men's and women's coincide,
-// runs the script with NO flag (both in one pass). Otherwise --mens or --womens.
-// Runs are queued sequentially — nothing is skipped, nothing overlaps.
+// Runs update_and_rescore.js (mens then womens) on a fixed schedule.
+// All run times are computed upfront at startup. If a run is still in
+// progress when the next is due, it queues. Queued runs always execute
+// even if they start after the window closes — they were scheduled
+// within the window. No runs are scheduled outside the window.
 //
 // Usage:
-//   node scheduler.js                                          # defaults: x=30, y=15, stop=00:00
-//   node scheduler.js --mens-interval=30 --womens-interval=15 --stop-at=00:00
-//   node scheduler.js -x=30 -y=15 -z=00:00
+//   node scheduler.js
+//   node scheduler.js --start=12:30 --end=23:45 --interval=45
 
 const { spawn } = require("child_process");
 const path = require("path");
 
 // ═══════════════════════════════════════════════════════════════════════
-// PARSE CLI ARGS
+// CONFIG
 // ═══════════════════════════════════════════════════════════════════════
 
+const DEFAULTS = { start: "12:30", end: "23:45", interval: 45 };
+
 function parseArgs() {
-  const args = process.argv.slice(2);
-  const config = {
-    mensInterval: 30,
-    womensInterval: 15,
-    stopAt: "00:00",
-  };
-
-  for (const arg of args) {
+  const config = { ...DEFAULTS };
+  for (const arg of process.argv.slice(2)) {
     const [key, val] = arg.split("=");
-    switch (key) {
-      case "--mens-interval": case "-x": config.mensInterval = Number(val); break;
-      case "--womens-interval": case "-y": config.womensInterval = Number(val); break;
-      case "--stop-at": case "-z": config.stopAt = val; break;
-    }
+    if (key === "--start")    config.start = val;
+    if (key === "--end")      config.end = val;
+    if (key === "--interval") config.interval = Number(val);
   }
-
-  if (isNaN(config.mensInterval) || config.mensInterval < 1 ||
-      isNaN(config.womensInterval) || config.womensInterval < 1) {
-    console.error("Intervals must be positive numbers.");
-    process.exit(1);
-  }
-
   return config;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// HELPERS
+// TIME HELPERS (all in Eastern)
 // ═══════════════════════════════════════════════════════════════════════
 
-function gcd(a, b) { return b === 0 ? a : gcd(b, a % b); }
-
-function getStopTime(stopAt) {
-  const [h, m] = stopAt.split(":").map(Number);
-  const stop = new Date();
-  stop.setHours(h, m, 0, 0);
-  if (stop <= new Date()) stop.setDate(stop.getDate() + 1);
-  return stop;
+function nowET() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
 }
 
-function timeStr(d) {
+function todayET(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  const d = nowET();
+  d.setHours(h, m, 0, 0);
+  return d;
+}
+
+function fmt(d) {
   return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SEQUENTIAL QUEUE
+// BUILD SCHEDULE
+// ═══════════════════════════════════════════════════════════════════════
+
+function buildSchedule(config) {
+  const times = [];
+  const start = todayET(config.start);
+  const end = todayET(config.end);
+  let t = new Date(start);
+
+  while (t <= end) {
+    times.push(new Date(t));
+    t = new Date(t.getTime() + config.interval * 60000);
+  }
+
+  return times;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// RUN UPDATE_AND_RESCORE
 // ═══════════════════════════════════════════════════════════════════════
 
 const SCRIPT = path.join(__dirname, "update_and_rescore.js");
-const queue = [];
-let processing = false;
 
-function enqueue(label, flags) {
-  queue.push({ label, flags });
-  console.log(`  📥 Queued: ${label}${queue.length > 1 ? ` (${queue.length - 1} ahead)` : ""}`);
-  drain();
-}
+function run(label) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    console.log(`\n${"─".repeat(60)}`);
+    console.log(`  ▶ ${label} — started at ${fmt(nowET())} ET`);
+    console.log(`${"─".repeat(60)}`);
 
-function drain() {
-  if (processing || queue.length === 0) return;
-  processing = true;
+    const child = spawn("node", [SCRIPT], {
+      stdio: "inherit",
+      env: process.env,
+    });
 
-  const { label, flags } = queue.shift();
-  const startTime = new Date();
-  console.log(`\n${"─".repeat(60)}`);
-  console.log(`  ▶ ${label} started at ${timeStr(startTime)}`);
-  console.log(`${"─".repeat(60)}`);
+    child.on("close", (code) => {
+      const sec = ((Date.now() - t0) / 1000).toFixed(1);
+      console.log(`  ${code === 0 ? "✓" : "✗"} ${label} finished in ${sec}s (exit ${code})`);
+      resolve(code);
+    });
 
-  const child = spawn("node", [SCRIPT, ...flags], {
-    stdio: "inherit",
-    env: process.env,
-  });
-
-  child.on("close", (code) => {
-    const elapsed = ((Date.now() - startTime.getTime()) / 1000).toFixed(1);
-    const status = code === 0 ? "✓" : `✗ exit ${code}`;
-    console.log(`  ${status} ${label} finished in ${elapsed}s`);
-    if (queue.length > 0) console.log(`  📋 ${queue.length} run(s) still queued`);
-    processing = false;
-    drain(); // process next in queue
-  });
-
-  child.on("error", (err) => {
-    console.error(`  ✗ ${label} spawn error: ${err.message}`);
-    processing = false;
-    drain();
+    child.on("error", (err) => {
+      console.error(`  ✗ ${label} spawn error: ${err.message}`);
+      resolve(1);
+    });
   });
 }
 
@@ -110,100 +102,86 @@ function drain() {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════
 
-function main() {
+async function main() {
   const config = parseArgs();
-  const stopTime = getStopTime(config.stopAt);
-  const remaining = stopTime.getTime() - Date.now();
-  const tickInterval = gcd(config.mensInterval, config.womensInterval);
+  const schedule = buildSchedule(config);
+
+  if (schedule.length === 0) {
+    console.log("  No runs to schedule. Exiting.");
+    process.exit(0);
+  }
 
   console.log(`\n╔══════════════════════════════════════════════════════════╗`);
   console.log(`║  BRACKET SCHEDULER                                      ║`);
   console.log(`╠══════════════════════════════════════════════════════════╣`);
-  console.log(`║  Men's interval (x):   every ${String(config.mensInterval).padStart(3)} min                   ║`);
-  console.log(`║  Women's interval (y): every ${String(config.womensInterval).padStart(3)} min                   ║`);
-  console.log(`║  Tick interval (GCD):  every ${String(tickInterval).padStart(3)} min                   ║`);
-  console.log(`║  Stop at (z):          ${config.stopAt.padEnd(6)}                            ║`);
-  console.log(`║  Stop time:            ${timeStr(stopTime).padEnd(11)}                       ║`);
-  console.log(`║  Remaining:            ${String((remaining / 60000).toFixed(0)).padStart(4)} min                         ║`);
+  console.log(`║  Window:    ${config.start} – ${config.end} ET${" ".repeat(30)}║`);
+  console.log(`║  Interval:  every ${config.interval} min${" ".repeat(33)}║`);
+  console.log(`║  Runs:      ${String(schedule.length).padEnd(3)} total${" ".repeat(33)}║`);
   console.log(`╚══════════════════════════════════════════════════════════╝`);
 
-  if (remaining <= 0) {
-    console.log("\n  Stop time already passed. Exiting.");
+  console.log(`\n  Full schedule:`);
+  for (let i = 0; i < schedule.length; i++) {
+    console.log(`    #${String(i + 1).padStart(2)}  ${fmt(schedule[i])} ET`);
+  }
+
+  // Skip runs whose time has already passed (if scheduler started late)
+  const now = nowET();
+  let nextIdx = 0;
+
+  while (nextIdx < schedule.length && schedule[nextIdx] < now) {
+    console.log(`\n  ⏩ Skipped #${nextIdx + 1} (${fmt(schedule[nextIdx])} ET — already past)`);
+    nextIdx++;
+  }
+
+  if (nextIdx >= schedule.length) {
+    console.log("\n  All scheduled runs are in the past. Exiting.");
     process.exit(0);
   }
 
-  // ── tick=0: always run both ──
-  let tickCount = 0;
-  enqueue("MEN'S + WOMEN'S (initial)", []);
+  // Wait for first upcoming run
+  const firstWait = schedule[nextIdx].getTime() - new Date().getTime();
+  if (firstWait > 0) {
+    const waitMin = Math.round(firstWait / 60000);
+    console.log(`\n  ⏳ Waiting ${waitMin} min until first run at ${fmt(schedule[nextIdx])} ET...`);
+    await new Promise(r => setTimeout(r, firstWait));
+  }
 
-  // ── schedule future ticks ──
-  const timer = setInterval(() => {
-    tickCount++;
-    const elapsed = tickCount * tickInterval; // minutes since start
-
-    if (stopTime.getTime() - Date.now() <= 0) return;
-
-    const mensDue   = elapsed % config.mensInterval === 0;
-    const womensDue = elapsed % config.womensInterval === 0;
-
-    if (mensDue && womensDue) {
-      enqueue(`MEN'S + WOMEN'S (t=${elapsed}min)`, []);
-    } else if (mensDue) {
-      enqueue(`MEN'S only (t=${elapsed}min)`, ["--mens"]);
-    } else if (womensDue) {
-      enqueue(`WOMEN'S only (t=${elapsed}min)`, ["--womens"]);
+  // Process runs sequentially
+  while (nextIdx < schedule.length) {
+    // Collect all due runs (scheduled time <= now)
+    const queue = [];
+    while (nextIdx < schedule.length && schedule[nextIdx].getTime() <= Date.now() + 1000) {
+      queue.push(nextIdx);
+      nextIdx++;
     }
-    // if neither is due this tick, do nothing
-  }, tickInterval * 60 * 1000);
 
-  // ── shutdown at stop time ──
-  const shutdownTimer = setTimeout(() => {
-    console.log(`\n${"═".repeat(60)}`);
-    console.log(`  🛑 Stop time reached (${config.stopAt}). No new runs will be queued.`);
-    console.log(`${"═".repeat(60)}`);
-    clearInterval(timer);
+    // Execute queued runs in order
+    for (const idx of queue) {
+      const label = `Run #${idx + 1} (scheduled ${fmt(schedule[idx])} ET)`;
+      await run(label);
+    }
 
-    // Wait for queue to drain, then exit
-    const exitCheck = setInterval(() => {
-      if (!processing && queue.length === 0) {
-        console.log("  All runs complete. Exiting.");
-        clearInterval(exitCheck);
-        process.exit(0);
+    // If more runs remain, sleep until the next one
+    if (nextIdx < schedule.length) {
+      const sleepMs = Math.max(0, schedule[nextIdx].getTime() - Date.now());
+      if (sleepMs > 0) {
+        const sleepMin = (sleepMs / 60000).toFixed(1);
+        console.log(`\n  ⏳ Next: #${nextIdx + 1} at ${fmt(schedule[nextIdx])} ET (${sleepMin} min)`);
+        await new Promise(r => setTimeout(r, sleepMs));
       }
-    }, 2000);
-
-    setTimeout(() => {
-      console.log("  Timeout waiting for in-flight run. Force exiting.");
-      process.exit(0);
-    }, 120000);
-  }, remaining);
-
-  // ── Ctrl+C ──
-  process.on("SIGINT", () => {
-    console.log("\n\n  Ctrl+C received. Cleaning up...");
-    clearInterval(timer);
-    clearTimeout(shutdownTimer);
-    setTimeout(() => process.exit(0), 1000);
-  });
-
-  // ── preview schedule ──
-  console.log(`\n  Schedule preview:`);
-  const previewTicks = Math.min(Math.ceil((remaining / 60000) / tickInterval), 10);
-  for (let i = 1; i <= previewTicks; i++) {
-    const t = i * tickInterval;
-    const m = t % config.mensInterval === 0;
-    const w = t % config.womensInterval === 0;
-    const what = m && w ? "MEN'S + WOMEN'S" : m ? "MEN'S only" : w ? "WOMEN'S only" : null;
-    if (what) {
-      const when = new Date(Date.now() + t * 60000);
-      console.log(`    t=${String(t).padStart(4)}min  ${timeStr(when)}  →  ${what}`);
     }
   }
-  if (previewTicks < Math.ceil((remaining / 60000) / tickInterval)) {
-    console.log(`    ... and more until ${config.stopAt}`);
-  }
 
-  console.log(`\n  Press Ctrl+C to stop early.\n`);
+  console.log(`\n${"═".repeat(60)}`);
+  console.log(`  ✓ All ${schedule.length} scheduled runs complete. Shutting down.`);
+  console.log(`${"═".repeat(60)}\n`);
+  process.exit(0);
 }
+
+// Ctrl+C
+process.on("SIGINT", () => {
+  console.log("\n\n  Ctrl+C — exiting.");
+  process.exit(0);
+});
 
 main();
