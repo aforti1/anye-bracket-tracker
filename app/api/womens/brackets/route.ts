@@ -104,8 +104,9 @@ export async function GET(req: NextRequest) {
   // Helper: apply primary + secondary sort to a Supabase query
   function applySort(query: any) {
     query = query.order(sortCol, { ascending: sortAsc });
-    if (sortCol === "total_points" || sortCol === "rank" || sortCol === "max_points") {
-      query = query.order("correct_picks", { ascending: false });
+    if (sortCol !== "bracket_hash") {
+      if (sortCol !== "total_points") query = query.order("total_points", { ascending: false });
+      if (sortCol !== "correct_picks") query = query.order("correct_picks", { ascending: false });
     }
     return query;
   }
