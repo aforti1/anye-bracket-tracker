@@ -17,7 +17,7 @@ const path = require("path");
 // CONFIG
 // ═══════════════════════════════════════════════════════════════════════
 
-const DEFAULTS = { start: "12:45", end: "23:45", interval: 30 };
+const DEFAULTS = { start: "14:30", end: "23:30", interval: 30 };
 
 function parseArgs() {
   const config = { ...DEFAULTS };
