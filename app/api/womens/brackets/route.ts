@@ -1,6 +1,8 @@
 // app/api/womens/brackets/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/db";
+import { picksSourceMode } from "@/lib/picks-source";
+import { scanFilteredIds } from "@/lib/picks-filter-scan";
 
 const ROUND_POINTS: Record<string, number> = {
   round_64: 10, round_32: 20, sweet_16: 40,
@@ -9,7 +11,10 @@ const ROUND_POINTS: Record<string, number> = {
 
 export const dynamic = "force-dynamic";
 
-// Tiebreaker-aware sort comparator
+const ALLOWED_SORTS = ["bracket_hash","champion_name","total_points","correct_picks","accuracy","log_prob","upset_count","rank","max_points","perfect_streak"];
+const BASE_COLS =
+  "id, bracket_hash, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank, perfect_streak";
+
 function tiebreakSort(a: any, b: any, sk: string, sortAsc: boolean): number {
   const va = a[sk] ?? 0;
   const vb = b[sk] ?? 0;
@@ -37,9 +42,9 @@ export async function GET(req: NextRequest) {
   const max_upsets  = searchParams.get("max_upsets")  ?? null;
   const pickFiltersRaw = searchParams.get("pick_filters") ?? null;
 
-  const allowedSorts = ["bracket_hash","champion_name","total_points","correct_picks","accuracy","log_prob","upset_count","rank","max_points","perfect_streak"];
-  const sortCol = allowedSorts.includes(sort) ? sort : "total_points";
+  const sortCol = ALLOWED_SORTS.includes(sort) ? sort : "total_points";
   const sortAsc = order === "asc";
+  const mode = picksSourceMode();
 
   let pickConditions: { game_idx: number; team_id: number; won: boolean }[] = [];
   if (pickFiltersRaw) {
@@ -81,7 +86,10 @@ export async function GET(req: NextRequest) {
 
   const games_complete = gameResults.length;
 
-  function enrichBracket(b: any) {
+  function enrichBlob(b: any) {
+    return { ...b, max_points: b.total_points, perfect_streak: b.perfect_streak ?? 0 };
+  }
+  function enrichSupabase(b: any) {
     const picks: number[] = b.picks ?? [];
     let max_points = b.total_points;
     for (const n of gameNodes) {
@@ -101,7 +109,6 @@ export async function GET(req: NextRequest) {
     return { ...rest, max_points, perfect_streak };
   }
 
-  // Helper: apply primary + secondary sort to a Supabase query
   function applySort(query: any) {
     query = query.order(sortCol, { ascending: sortAsc });
     if (sortCol !== "bracket_hash") {
@@ -113,6 +120,40 @@ export async function GET(req: NextRequest) {
 
   // ── PICK FILTER PATH ──
   if (pickConditions.length > 0) {
+    if (mode === "blob") {
+      try {
+        const allIds = await scanFilteredIds("womens", {
+          conditions: pickConditions,
+          champion_id: champion_id ? parseInt(champion_id) : null,
+          min_upsets: min_upsets ? parseInt(min_upsets) : null,
+          max_upsets: max_upsets ? parseInt(max_upsets) : null,
+          sort_col: sortCol,
+          sort_asc: sortAsc,
+          nodeMap,
+        });
+        const offset = (page - 1) * per_page;
+        const pageIds = allIds.slice(offset, offset + per_page);
+        let enriched: any[] = [];
+        if (pageIds.length > 0) {
+          const { data } = await supabase
+            .from("w_brackets")
+            .select(BASE_COLS)
+            .in("id", pageIds);
+          const rowMap = new Map((data ?? []).map((r: any) => [r.id, r]));
+          enriched = pageIds.map(id => rowMap.get(id)).filter(Boolean).map(enrichBlob);
+        }
+        return NextResponse.json({
+          brackets: enriched, total: allIds.length, page, per_page,
+          total_pages: Math.ceil(allIds.length / per_page),
+          games_complete, tournament_live: games_complete > 0 && games_complete < 63,
+        });
+      } catch (err: any) {
+        console.error("blob filter scan failed:", err);
+        return NextResponse.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // Supabase mode: original RPC path.
     const conditionsWithSources = pickConditions.map(c => {
       const node = nodeMap.get(c.game_idx);
       return {
@@ -189,13 +230,13 @@ export async function GET(req: NextRequest) {
 
   // ── STANDARD FILTER PATH ──
   if (champion_id || min_upsets || max_upsets) {
+    const cols = mode === "blob" ? BASE_COLS : `${BASE_COLS}, picks`;
     const BATCH = 10000;
     let from = 0;
     const matchingRows = new Map<number, any>();
 
     while (true) {
-      let q = supabase.from("w_brackets")
-        .select("id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank");
+      let q = supabase.from("w_brackets").select(cols);
       q = applySort(q);
       q = q.range(from, from + BATCH - 1);
 
@@ -207,7 +248,7 @@ export async function GET(req: NextRequest) {
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       if (!data || data.length === 0) break;
 
-      for (const row of data) matchingRows.set(row.id, row);
+      for (const row of data) matchingRows.set((row as any).id, row);
       if (data.length < BATCH) break;
       from += BATCH;
     }
@@ -222,7 +263,8 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    let enriched = allMatching.map(enrichBracket);
+    const enrichFn = mode === "blob" ? enrichBlob : enrichSupabase;
+    let enriched = allMatching.map(enrichFn);
     const sk = sort === "perfect_streak" ? "perfect_streak" : (sort === "max_points" ? "max_points" : sortCol);
     enriched.sort((a: any, b: any) => tiebreakSort(a, b, sk, sortAsc));
 
@@ -245,16 +287,16 @@ export async function GET(req: NextRequest) {
   const from_idx = (page - 1) * per_page;
   const to_idx = from_idx + per_page - 1;
 
-  let query = supabase
-    .from("w_brackets")
-    .select("id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank");
+  const cols = mode === "blob" ? BASE_COLS : `${BASE_COLS}, picks`;
+  let query = supabase.from("w_brackets").select(cols);
   query = applySort(query);
   query = query.range(from_idx, to_idx);
 
   const { data, error } = await query;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  let enriched = (data ?? []).map(enrichBracket);
+  const enrichFn = mode === "blob" ? enrichBlob : enrichSupabase;
+  let enriched = (data ?? []).map(enrichFn);
 
   return NextResponse.json({
     brackets: enriched, total, page, per_page, total_pages,

@@ -1,6 +1,8 @@
 // app/api/brackets/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/db";
+import { picksSourceMode } from "@/lib/picks-source";
+import { scanFilteredIds } from "@/lib/picks-filter-scan";
 
 const ROUND_POINTS: Record<string, number> = {
   round_64: 10, round_32: 20, sweet_16: 40,
@@ -8,6 +10,10 @@ const ROUND_POINTS: Record<string, number> = {
 };
 
 export const dynamic = "force-dynamic";
+
+const ALLOWED_SORTS = ["bracket_hash","champion_name","total_points","correct_picks","accuracy","log_prob","upset_count","rank","max_points","perfect_streak"];
+const BASE_COLS =
+  "id, bracket_hash, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank, perfect_streak";
 
 // Tiebreaker-aware sort comparator
 function tiebreakSort(a: any, b: any, sk: string, sortAsc: boolean): number {
@@ -38,9 +44,9 @@ export async function GET(req: NextRequest) {
   const max_upsets  = searchParams.get("max_upsets")  ?? null;
   const pickFiltersRaw = searchParams.get("pick_filters") ?? null;
 
-  const allowedSorts = ["bracket_hash","champion_name","total_points","correct_picks","accuracy","log_prob","upset_count","rank","max_points","perfect_streak"];
-  const sortCol = allowedSorts.includes(sort) ? sort : "total_points";
+  const sortCol = ALLOWED_SORTS.includes(sort) ? sort : "total_points";
   const sortAsc = order === "asc";
+  const mode = picksSourceMode();
 
   let pickConditions: { game_idx: number; team_id: number; won: boolean }[] = [];
   if (pickFiltersRaw) {
@@ -50,7 +56,8 @@ export async function GET(req: NextRequest) {
     } catch {}
   }
 
-  // Load game structure (needed for enrichment: max_points, perfect_streak)
+  // Load game structure (only used in supabase mode for max_points/streak;
+  // games_complete is always returned).
   const [nodesRes, resultsRes] = await Promise.all([
     supabase.from("game_nodes").select("*").order("game_idx"),
     supabase.from("game_results").select("game_idx, winner_id, completed_at").order("completed_at"),
@@ -61,10 +68,10 @@ export async function GET(req: NextRequest) {
   const winnerByIdx = new Map(gameResults.map(r => [r.game_idx, r.winner_id]));
   const decidedIdxes = Array.from(winnerByIdx.keys()).sort((a, b) => a - b);
   const decidedSet = new Set(decidedIdxes);
-  // For streak: order by when games actually finished, not bracket tree position
   const decidedByTime = gameResults.map((r: any) => r.game_idx);
+  const games_complete = gameResults.length;
 
-  // Build eliminated set: teams that lost a decided game
+  // Build eliminated set (supabase-mode max_points calc)
   const eliminated = new Set<number>();
   for (const gi of decidedIdxes) {
     const node = nodeMap.get(gi);
@@ -83,10 +90,12 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  const games_complete = gameResults.length;
+  // ── Enrichment helpers ──────────────────────────────────────────────
+  function enrichBlob(b: any) {
+    return { ...b, max_points: b.total_points, perfect_streak: b.perfect_streak ?? 0 };
+  }
 
-  // Enrich a bracket row with computed fields (runs on page of results only)
-  function enrichBracket(b: any) {
+  function enrichSupabase(b: any) {
     const picks: number[] = b.picks ?? [];
     let max_points = b.total_points;
     for (const n of gameNodes) {
@@ -106,7 +115,6 @@ export async function GET(req: NextRequest) {
     return { ...rest, max_points, perfect_streak };
   }
 
-  // Helper: apply secondary sort to a Supabase query
   function applySort(query: any) {
     query = query.order(sortCol, { ascending: sortAsc });
     if (sortCol !== "bracket_hash") {
@@ -116,8 +124,44 @@ export async function GET(req: NextRequest) {
     return query;
   }
 
-  // ── PICK FILTER PATH (uses SQL RPC) ──
+  // ── PICK FILTER PATH ──
   if (pickConditions.length > 0) {
+    if (mode === "blob") {
+      // Run the blob-backed scan. Returns ordered ids; we then page-fetch the
+      // metadata columns from Supabase for the requested page only.
+      try {
+        const allIds = await scanFilteredIds("mens", {
+          conditions: pickConditions,
+          champion_id: champion_id ? parseInt(champion_id) : null,
+          min_upsets: min_upsets ? parseInt(min_upsets) : null,
+          max_upsets: max_upsets ? parseInt(max_upsets) : null,
+          sort_col: sortCol,
+          sort_asc: sortAsc,
+          nodeMap,
+        });
+        const offset = (page - 1) * per_page;
+        const pageIds = allIds.slice(offset, offset + per_page);
+        let enriched: any[] = [];
+        if (pageIds.length > 0) {
+          const { data } = await supabase
+            .from("brackets")
+            .select(BASE_COLS)
+            .in("id", pageIds);
+          const rowMap = new Map((data ?? []).map((r: any) => [r.id, r]));
+          enriched = pageIds.map(id => rowMap.get(id)).filter(Boolean).map(enrichBlob);
+        }
+        return NextResponse.json({
+          brackets: enriched, total: allIds.length, page, per_page,
+          total_pages: Math.ceil(allIds.length / per_page),
+          games_complete, tournament_live: games_complete > 0 && games_complete < 63,
+        });
+      } catch (err: any) {
+        console.error("blob filter scan failed:", err);
+        return NextResponse.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // Supabase mode: original RPC path.
     const conditionsWithSources = pickConditions.map(c => {
       const node = nodeMap.get(c.game_idx);
       return {
@@ -201,7 +245,7 @@ export async function GET(req: NextRequest) {
       return jsPickFilterFallback(
         pickConditions, nodeMap, winnerByIdx, decidedByTime, eliminated, gameNodes,
         champion_id, min_upsets, max_upsets, sortCol, sortAsc, sort, order,
-        page, per_page, games_complete, enrichBracket
+        page, per_page, games_complete, enrichSupabase
       );
     }
   }
@@ -211,13 +255,12 @@ export async function GET(req: NextRequest) {
   const to2 = from2 + per_page - 1;
   const hasAnyFilter = !!(champion_id || min_upsets || max_upsets);
 
-  const selectFields = "id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank";
+  const cols = mode === "blob" ? BASE_COLS : `${BASE_COLS}, picks`;
 
   let query = hasAnyFilter
-    ? supabase.from("brackets").select(selectFields, { count: "exact" })
-    : supabase.from("brackets").select(selectFields);
+    ? supabase.from("brackets").select(cols, { count: "exact" })
+    : supabase.from("brackets").select(cols);
 
-  // Apply primary + secondary sort
   query = applySort(query);
 
   if (champion_id) query = query.eq("champion_id", parseInt(champion_id));
@@ -236,7 +279,8 @@ export async function GET(req: NextRequest) {
     total = parseInt(meta?.value ?? "0") || 1000000;
   }
 
-  let enriched = (data ?? []).map(enrichBracket);
+  const enrichFn = mode === "blob" ? enrichBlob : enrichSupabase;
+  const enriched = (data ?? []).map(enrichFn);
 
   return NextResponse.json({
     brackets: enriched, total, page, per_page,
@@ -245,7 +289,7 @@ export async function GET(req: NextRequest) {
   });
 }
 
-// ── JS FALLBACK for pick filtering ──
+// ── JS FALLBACK for pick filtering (supabase mode only) ──
 async function jsPickFilterFallback(
   pickConditions: { game_idx: number; team_id: number; won: boolean }[],
   nodeMap: Map<number, any>,
@@ -287,7 +331,7 @@ async function jsPickFilterFallback(
 
   while (true) {
     let q = supabase.from("brackets")
-      .select("id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank")
+      .select(`${BASE_COLS}, picks`)
       .range(from, from + batchSize - 1)
       .order("id", { ascending: true });
 
@@ -332,5 +376,3 @@ async function jsPickFilterFallback(
     games_complete, tournament_live: games_complete > 0 && games_complete < 63,
   });
 }
-
-

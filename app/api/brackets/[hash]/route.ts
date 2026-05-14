@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/db";
+import { picksSourceMode } from "@/lib/picks-source";
+import { getPicksForId } from "@/lib/picks-blob";
 import type { BracketDetail, PickDetail, TournamentTeam, GameNode, Round } from "@/lib/types";
 
 export const dynamic = 'force-dynamic';
@@ -9,15 +11,23 @@ const ROUND_POINTS: Record<Round, number> = {
   elite_8: 80, final_four: 160, championship: 320,
 };
 
+const BRACKET_COLS_NO_PICKS =
+  "id, bracket_hash, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank, perfect_streak";
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ hash: string }> }
 ) {
   const { hash: rawHash } = await params;
   const hash = rawHash.toUpperCase();
+  const mode = picksSourceMode();
+
+  // Fetch bracket row WITHOUT picks. If we're in supabase mode we'll fetch
+  // picks from the same row in the same query for back-compat.
+  const cols = mode === "blob" ? BRACKET_COLS_NO_PICKS : `${BRACKET_COLS_NO_PICKS}, picks`;
 
   const [bracketRes, nodesRes, teamsRes, resultsRes] = await Promise.all([
-    supabase.from("brackets").select("*").eq("bracket_hash", hash).single(),
+    supabase.from("brackets").select(cols).eq("bracket_hash", hash).single(),
     supabase.from("game_nodes").select("*").order("game_idx"),
     supabase.from("tournament_teams").select("*"),
     supabase.from("game_results").select("*"),
@@ -26,7 +36,7 @@ export async function GET(
   if (bracketRes.error || !bracketRes.data) {
     return NextResponse.json({ error: "Bracket not found" }, { status: 404 });
   }
-  const bracket = bracketRes.data;
+  const bracket: any = bracketRes.data;
 
   const rank = bracket.rank ?? null;
 
@@ -38,7 +48,13 @@ export async function GET(
   );
   const nodeList = (nodesRes.data ?? []) as GameNode[];
 
-  const picks: number[] = bracket.picks ?? [];
+  // Resolve picks based on the source flag.
+  let picks: number[];
+  if (mode === "blob") {
+    picks = await getPicksForId(bracket.id, "mens");
+  } else {
+    picks = bracket.picks ?? [];
+  }
 
   const pick_details: PickDetail[] = nodeList.map((node) => {
     const predicted_id   = picks[node.game_idx] ?? 0;
@@ -79,5 +95,8 @@ export async function GET(
     };
   });
 
-  return NextResponse.json({ ...bracket, picks, rank, pick_details });
+  // Strip the picks column from the response payload — we always return
+  // `picks` from our resolved value, never from the DB row.
+  const { picks: _stripped, ...bracketRest } = bracket;
+  return NextResponse.json({ ...bracketRest, picks, rank, pick_details });
 }

@@ -1,6 +1,7 @@
 // app/api/brackets/by-ids/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/db";
+import { picksSourceMode } from "@/lib/picks-source";
 
 const ROUND_POINTS: Record<string, number> = {
   round_64: 10, round_32: 20, sweet_16: 40,
@@ -9,16 +10,41 @@ const ROUND_POINTS: Record<string, number> = {
 
 export const dynamic = "force-dynamic";
 
+const BASE_COLS =
+  "id, bracket_hash, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank, perfect_streak";
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const ids: number[] = body.ids ?? [];
-
-  if (ids.length === 0) {
-    return NextResponse.json({ brackets: [] });
-  }
+  if (ids.length === 0) return NextResponse.json({ brackets: [] });
 
   const safeIds = ids.slice(0, 100);
+  const mode = picksSourceMode();
 
+  // Blob mode: leaderboard never needs picks. max_points == total_points
+  // (tournament finalized) and perfect_streak is read directly from the column.
+  if (mode === "blob") {
+    const { data, error } = await supabase
+      .from("brackets")
+      .select(BASE_COLS)
+      .in("id", safeIds);
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+    const rowMap = new Map((data ?? []).map((r: any) => [r.id, r]));
+    const enriched = safeIds
+      .map(id => rowMap.get(id))
+      .filter(Boolean)
+      .map((b: any) => ({
+        ...b,
+        max_points: b.total_points,
+        perfect_streak: b.perfect_streak ?? 0,
+      }));
+    return NextResponse.json({ brackets: enriched });
+  }
+
+  // Supabase mode (legacy): keep original behavior, scanning picks for
+  // max_points & perfect_streak so we stay byte-for-byte compatible while
+  // the flag is off.
   const [nodesRes, resultsRes] = await Promise.all([
     supabase.from("game_nodes").select("game_idx, round, team_a_id, team_b_id, source_a, source_b").order("game_idx"),
     supabase.from("game_results").select("game_idx, winner_id, completed_at").order("completed_at"),
@@ -51,7 +77,7 @@ export async function POST(req: NextRequest) {
 
   const { data, error } = await supabase
     .from("brackets")
-    .select("id, bracket_hash, picks, champion_id, champion_name, champion_seed, log_prob, upset_count, total_points, correct_picks, games_decided, accuracy, rank")
+    .select(`${BASE_COLS}, picks`)
     .in("id", safeIds);
 
   if (error) {
