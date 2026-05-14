@@ -4,7 +4,11 @@
     "module": "commonjs",
     "moduleResolution": "node",
     "esModuleInterop": true,
-    "outDir": "./dist-scripts"
+    "outDir": "./dist-scripts",
+    "baseUrl": "."
+  },
+  "ts-node": {
+    "require": ["tsconfig-paths/register"]
   },
   "include": ["scripts/**/*", "lib/**/*"]
 }

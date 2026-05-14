@@ -81,8 +81,10 @@ before writing.
 
 ### 4. Run parity tests
 
-These run against your local `.env`. They assume the blob is uploaded (or
-you have local `data/picks_*.bin` files for the filter test).
+Both run against your local `.env`. The blob must already be uploaded
+(`PICKS_BLOB_URL_MENS` / `PICKS_BLOB_URL_WOMENS` populated) — `parity:filter`
+imports the production scan helper directly via the `@/lib/...` alias and
+exercises the same blob fetch the deployed function will.
 
 ```
 npm run parity:detail              # 1000 random brackets, byte-for-byte equality
