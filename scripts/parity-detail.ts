@@ -11,18 +11,21 @@
  *   npx ts-node --project tsconfig.scripts.json scripts/parity-detail.ts --n 1000
  *
  * Env required:
+ *   DATABASE_URL
  *   NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
  *   PICKS_BLOB_URL_MENS, PICKS_BLOB_URL_WOMENS
  */
 
 import * as path from "path";
 import * as dotenv from "dotenv";
+import { Client } from "pg";
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
 import { createClient } from "@supabase/supabase-js";
 
 const N = parseInt(process.argv.find(a => a.startsWith("--n="))?.split("=")[1] ?? "1000");
 
+const databaseUrl = process.env.DATABASE_URL!;
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
@@ -30,6 +33,17 @@ const supabase = createClient(
 );
 
 const RECORD_SIZE = 126;
+
+function pgClientFromUrl(url: string): Client {
+  const parsed = new URL(url);
+  return new Client({
+    host: parsed.hostname,
+    port: parseInt(parsed.port || "5432", 10),
+    database: parsed.pathname.replace(/^\//, ""),
+    user: decodeURIComponent(parsed.username),
+    password: decodeURIComponent(parsed.password),
+  });
+}
 
 async function picksFromBlob(url: string, id: number): Promise<number[]> {
   const start = (id - 1) * RECORD_SIZE;
@@ -60,14 +74,26 @@ async function checkGender(gender: "mens" | "womens", n: number) {
 
   console.log(`\n=== ${gender.toUpperCase()} (${table}) ===`);
 
-  // Pick N random ids from 1..max
-  const { data: hi } = await supabase.from(table).select("id").order("id", { ascending: false }).limit(1).single();
-  const maxId = (hi as any)?.id ?? 0;
-  if (!maxId) { console.error("no rows"); return; }
+  // Get id range via direct PG (HTTP API was returning no rows here)
+  const client = pgClientFromUrl(databaseUrl);
+  await client.connect();
+  let idList: number[];
+  try {
+    const res = await client.query(`SELECT MIN(id)::int AS min_id, MAX(id)::int AS max_id, COUNT(*)::int AS cnt FROM ${table}`);
+    const { min_id, max_id, cnt } = res.rows[0];
+    console.log(`  id range ${min_id}..${max_id}, total=${cnt.toLocaleString()}`);
+    if (!cnt) { console.error("  no rows"); return; }
 
-  const ids = new Set<number>();
-  while (ids.size < n) ids.add(1 + Math.floor(Math.random() * maxId));
-  const idList = Array.from(ids);
+    // Pick n random ids in [min_id..max_id]
+    const ids = new Set<number>();
+    while (ids.size < n) {
+      const r = min_id + Math.floor(Math.random() * (max_id - min_id + 1));
+      ids.add(r);
+    }
+    idList = Array.from(ids);
+  } finally {
+    await client.end();
+  }
 
   // Fetch picks from Supabase in batches
   const supaMap = new Map<number, number[]>();

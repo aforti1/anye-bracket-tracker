@@ -1,23 +1,31 @@
 /**
  * scripts/backfill-perfect-streak.ts
  *
- * Computes perfect_streak for every bracket and writes it to the new column
- * in Supabase. Picks are read from the source Parquet files in the sibling
- * ML repo (NOT from Supabase's picks column), per the migration plan.
+ * Computes perfect_streak for every bracket and writes it via:
+ *   1. Read picks from Parquet, compute streaks in memory
+ *   2. Bulk-insert (id, streak) pairs into a temp staging table via COPY
+ *   3. Single UPDATE FROM staging → brackets.perfect_streak
+ *
+ * Uses a direct Postgres connection (pg) via the Supabase pooler. URL is
+ * parsed explicitly because some pg clients mishandle pooler usernames
+ * containing a dot.
  *
  * Usage:
  *   npx ts-node --project tsconfig.scripts.json scripts/backfill-perfect-streak.ts
  *   npx ts-node --project tsconfig.scripts.json scripts/backfill-perfect-streak.ts --gender mens
  *   npx ts-node --project tsconfig.scripts.json scripts/backfill-perfect-streak.ts --dry-run
  *
- * Env required: NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
- *
+ * Env required: DATABASE_URL (Supabase pooler connection string).
  * Prereq: run supabase/migrations/001_add_perfect_streak.sql first.
  */
 
 import * as fs from "fs";
 import * as path from "path";
 import * as dotenv from "dotenv";
+import { Client } from "pg";
+import { from as copyFrom } from "pg-copy-streams";
+import { pipeline } from "stream/promises";
+import { Readable } from "stream";
 
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
@@ -49,13 +57,29 @@ const SELECTED_GENDER = (() => {
   return g as "mens" | "womens" | null;
 })();
 
+const databaseUrl = process.env.DATABASE_URL!;
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+if (!databaseUrl) {
+  console.error("❌ Missing DATABASE_URL in .env");
+  process.exit(1);
+}
 if (!supabaseUrl || !supabaseKey) {
   console.error("❌ Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   process.exit(1);
 }
 const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
+
+function pgClientFromUrl(url: string): Client {
+  const parsed = new URL(url);
+  return new Client({
+    host: parsed.hostname,
+    port: parseInt(parsed.port || "5432", 10),
+    database: parsed.pathname.replace(/^\//, ""),
+    user: decodeURIComponent(parsed.username),
+    password: decodeURIComponent(parsed.password),
+  });
+}
 
 function parsePicks(raw: any): number[] {
   if (typeof raw === "string") return raw.split(",").map(Number);
@@ -84,6 +108,14 @@ async function loadWinners(resultsTable: string): Promise<Map<number, number>> {
   return new Map((data ?? []).map((r: any) => [r.game_idx, r.winner_id]));
 }
 
+async function loadHashToId(client: Client, table: string): Promise<Map<string, number>> {
+  console.log(`  querying ${table} for hash→id (single query via direct PG)...`);
+  const res = await client.query(`SELECT id, bracket_hash FROM ${table}`);
+  const map = new Map<string, number>();
+  for (const row of res.rows) map.set(String(row.bracket_hash), row.id);
+  return map;
+}
+
 function computeStreak(picks: number[], decidedByTime: number[], winnerByIdx: Map<number, number>): number {
   let s = 0;
   for (let i = decidedByTime.length - 1; i >= 0; i--) {
@@ -107,94 +139,88 @@ async function backfillGender(gender: "mens" | "womens") {
   const winnerByIdx = await loadWinners(cfg.resultsTbl);
   console.log(`  ${decidedByTime.length} games decided`);
   if (decidedByTime.length === 0) {
-    console.error(`❌ No game results — perfect_streak would be all 0. Aborting (you'd waste a write).`);
+    console.error(`❌ No game results — perfect_streak would be all 0. Aborting.`);
     return;
   }
 
-  console.log(`Reading parquet → computing streaks (in memory)...`);
-  const reader = await parquet.ParquetReader.openFile(cfg.parquet);
-  const cursor = reader.getCursor();
-  // bracket_hash → streak
-  const streakByHash = new Map<string, number>();
-  let row: any = null;
-  let n = 0;
-  while ((row = await cursor.next())) {
-    const hash = String(row.bracket_hash);
-    const picks = parsePicks(row.picks);
-    if (picks.length !== 63) {
-      console.warn(`  ⚠ ${hash}: picks length ${picks.length}, expected 63 — defaulting streak to 0`);
-      streakByHash.set(hash, 0);
-    } else {
-      streakByHash.set(hash, computeStreak(picks, decidedByTime, winnerByIdx));
+  console.log(`Connecting to Postgres...`);
+  const client = pgClientFromUrl(databaseUrl);
+  await client.connect();
+  const stagingTable = `_streak_staging_${gender}_${Date.now()}`;
+
+  try {
+    console.log(`Loading hash→id mapping from ${cfg.table}...`);
+    const hashToId = await loadHashToId(client, cfg.table);
+    console.log(`  ${hashToId.size.toLocaleString()} brackets in DB`);
+
+    console.log(`Reading parquet → computing streaks...`);
+    const reader = await parquet.ParquetReader.openFile(cfg.parquet);
+    const cursor = reader.getCursor();
+    const streakById: Array<[number, number]> = [];
+    let row: any = null;
+    let n = 0;
+    let missing = 0;
+    while ((row = await cursor.next())) {
+      const hash = String(row.bracket_hash);
+      const id = hashToId.get(hash);
+      if (id === undefined) { missing++; n++; continue; }
+      const picks = parsePicks(row.picks);
+      const streak = picks.length === 63 ? computeStreak(picks, decidedByTime, winnerByIdx) : 0;
+      streakById.push([id, streak]);
+      n++;
+      if (n % 100000 === 0) process.stdout.write(`  ${n.toLocaleString()} computed\r`);
     }
-    n++;
-    if (n % 100000 === 0) process.stdout.write(`  ${n.toLocaleString()} computed\r`);
-  }
-  await reader.close();
-  console.log(`  ${n.toLocaleString()} brackets total`);
+    await reader.close();
+    console.log(`  ${n.toLocaleString()} brackets read, ${streakById.length.toLocaleString()} matched to DB`);
+    if (missing > 0) console.warn(`  ⚠ ${missing.toLocaleString()} parquet rows had no matching DB row`);
 
-  // Histogram for sanity
-  const hist = new Map<number, number>();
-  for (const v of streakByHash.values()) hist.set(v, (hist.get(v) ?? 0) + 1);
-  console.log(`  streak histogram (top 10):`);
-  Array.from(hist.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .forEach(([k, v]) => console.log(`    streak=${k}: ${v.toLocaleString()}`));
+    const hist = new Map<number, number>();
+    for (const [, v] of streakById) hist.set(v, (hist.get(v) ?? 0) + 1);
+    console.log(`  streak histogram (top 10):`);
+    Array.from(hist.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .forEach(([k, v]) => console.log(`    streak=${k}: ${v.toLocaleString()}`));
 
-  if (DRY_RUN) {
-    console.log(`  [DRY RUN] Would write to ${cfg.table}.perfect_streak. Skipping.`);
-    return;
-  }
-
-  // Group by streak value, then update by hash batches.
-  console.log(`Writing perfect_streak to ${cfg.table}...`);
-  const byStreak = new Map<number, string[]>();
-  for (const [hash, streak] of streakByHash) {
-    if (!byStreak.has(streak)) byStreak.set(streak, []);
-    byStreak.get(streak)!.push(hash);
-  }
-
-  const HASH_BATCH = 500;
-  let totalWritten = 0;
-  let writeErrors = 0;
-  const t0 = Date.now();
-
-  for (const [streak, hashes] of byStreak) {
-    for (let i = 0; i < hashes.length; i += HASH_BATCH) {
-      const chunk = hashes.slice(i, i + HASH_BATCH);
-      const { error } = await supabase
-        .from(cfg.table)
-        .update({ perfect_streak: streak })
-        .in("bracket_hash", chunk);
-      if (error) {
-        writeErrors++;
-        console.warn(`  ⚠ batch fail streak=${streak} (${chunk.length}): ${error.message}`);
-      } else {
-        totalWritten += chunk.length;
-      }
-      if (totalWritten % 20000 === 0 && totalWritten > 0) {
-        const elapsed = (Date.now() - t0) / 1000;
-        const rate = Math.round(totalWritten / elapsed);
-        process.stdout.write(`  ${totalWritten.toLocaleString()} written [${elapsed.toFixed(0)}s, ${rate}/s]\r`);
-      }
+    if (DRY_RUN) {
+      console.log(`  [DRY RUN] Would write to ${cfg.table}.perfect_streak via COPY+UPDATE. Skipping.`);
+      return;
     }
-  }
-  console.log(`\n  ✓ wrote ${totalWritten.toLocaleString()} rows, ${writeErrors} batch errors`);
 
-  // Sanity check: count nulls remaining
-  const { count: nullCount } = await supabase
-    .from(cfg.table)
-    .select("id", { count: "exact", head: true })
-    .is("perfect_streak", null);
-  console.log(`  perfect_streak NULL count after write: ${nullCount ?? 0}`);
+    console.log(`Writing perfect_streak to ${cfg.table} via staging table...`);
+    const t0 = Date.now();
+    await client.query(`CREATE TEMP TABLE ${stagingTable} (id INTEGER PRIMARY KEY, streak SMALLINT NOT NULL)`);
+    console.log(`  staging table created, copying ${streakById.length.toLocaleString()} rows...`);
+
+    const stream = client.query(copyFrom(`COPY ${stagingTable} (id, streak) FROM STDIN WITH (FORMAT csv)`));
+    const source = Readable.from(
+      (function* () {
+        for (const [id, streak] of streakById) yield `${id},${streak}\n`;
+      })()
+    );
+    await pipeline(source, stream);
+    const copyMs = Date.now() - t0;
+    console.log(`  COPY done in ${(copyMs / 1000).toFixed(1)}s`);
+
+    const t1 = Date.now();
+    console.log(`  running UPDATE FROM...`);
+    const result = await client.query(
+      `UPDATE ${cfg.table} t SET perfect_streak = s.streak FROM ${stagingTable} s WHERE t.id = s.id`
+    );
+    const updateMs = Date.now() - t1;
+    console.log(`  UPDATE done in ${(updateMs / 1000).toFixed(1)}s — ${result.rowCount?.toLocaleString()} rows`);
+
+    const nullRes = await client.query(`SELECT COUNT(*)::int AS c FROM ${cfg.table} WHERE perfect_streak IS NULL`);
+    console.log(`  perfect_streak NULL count after write: ${nullRes.rows[0].c}`);
+
+  } finally {
+    await client.end();
+  }
 }
 
 async function main() {
   const targets: ("mens" | "womens")[] = SELECTED_GENDER ? [SELECTED_GENDER] : ["mens", "womens"];
-  for (const g of targets) {
-    await backfillGender(g);
-  }
+  for (const g of targets) await backfillGender(g);
   console.log("\n✅ Backfill complete.");
 }
 

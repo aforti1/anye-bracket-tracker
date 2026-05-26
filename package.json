@@ -12,7 +12,8 @@
     "backfill:streak": "npx ts-node --project tsconfig.scripts.json scripts/backfill-perfect-streak.ts",
     "blob:export": "npx ts-node --project tsconfig.scripts.json scripts/export-picks-blob.ts",
     "parity:detail": "npx ts-node --project tsconfig.scripts.json scripts/parity-detail.ts",
-    "parity:filter": "npx ts-node --project tsconfig.scripts.json scripts/parity-filter.ts"
+    "parity:filter": "npx ts-node --project tsconfig.scripts.json scripts/parity-filter.ts",
+    "verify:streak": "npx ts-node --project tsconfig.scripts.json scripts/verify-streak.ts"
   },
   "dependencies": {
     "@dsnp/parquetjs": "^1.8.3",
@@ -21,11 +22,14 @@
     "dotenv": "^16.4.5",
     "next": "^15.2.3",
     "pg": "^8.20.0",
+    "pg-copy-streams": "^7.0.0",
     "react": "^18",
     "react-dom": "^18"
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/pg": "^8.20.0",
+    "@types/pg-copy-streams": "^1.2.5",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "autoprefixer": "^10.0.1",

@@ -8,24 +8,23 @@
  * Output file layout:
  *   record N (1-indexed) = bytes [(N-1)*126 .. (N-1)*126 + 125]
  *   each record = 63 picks × 2 bytes LE = 126 bytes
- *   total file size = N * 126
+ *   total file size = maxId * 126
  *
  * Usage:
  *   npx ts-node --project tsconfig.scripts.json scripts/export-picks-blob.ts
- *   npx ts-node --project tsconfig.scripts.json scripts/export-picks-blob.ts --gender mens
+ *   npx ts-node --project tsconfig.scripts.json scripts/export-picks-blob.ts --gender womens
  *   npx ts-node --project tsconfig.scripts.json scripts/export-picks-blob.ts --no-upload
  *
  * Env required:
- *   NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  (always)
+ *   DATABASE_URL                                          (always — for id↔hash lookup)
+ *   NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY   (always — for spot-check)
  *   BLOB_READ_WRITE_TOKEN                                 (only if uploading)
- *
- * Side effect on success: prints the final blob URL. You must put it in
- * env vars PICKS_BLOB_URL_MENS / PICKS_BLOB_URL_WOMENS for the runtime.
  */
 
 import * as fs from "fs";
 import * as path from "path";
 import * as dotenv from "dotenv";
+import { Client } from "pg";
 
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
@@ -59,13 +58,29 @@ const SELECTED_GENDER = (() => {
   return g as "mens" | "womens" | null;
 })();
 
+const databaseUrl = process.env.DATABASE_URL!;
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+if (!databaseUrl) {
+  console.error("❌ Missing DATABASE_URL in .env");
+  process.exit(1);
+}
 if (!supabaseUrl || !supabaseKey) {
   console.error("❌ Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   process.exit(1);
 }
 const supabase = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
+
+function pgClientFromUrl(url: string): Client {
+  const parsed = new URL(url);
+  return new Client({
+    host: parsed.hostname,
+    port: parseInt(parsed.port || "5432", 10),
+    database: parsed.pathname.replace(/^\//, ""),
+    user: decodeURIComponent(parsed.username),
+    password: decodeURIComponent(parsed.password),
+  });
+}
 
 function parsePicks(raw: any): number[] {
   if (typeof raw === "string") return raw.split(",").map(Number);
@@ -77,24 +92,11 @@ function parsePicks(raw: any): number[] {
   return [];
 }
 
-async function loadHashToId(table: string): Promise<Map<string, number>> {
-  console.log(`Loading id↔hash map from ${table}...`);
+async function loadHashToId(client: Client, table: string): Promise<Map<string, number>> {
+  console.log(`Loading id↔hash map from ${table} via direct PG...`);
+  const res = await client.query(`SELECT id, bracket_hash FROM ${table}`);
   const map = new Map<string, number>();
-  const BATCH = 50000;
-  let from = 0;
-  while (true) {
-    const { data, error } = await supabase
-      .from(table)
-      .select("id, bracket_hash")
-      .order("id", { ascending: true })
-      .range(from, from + BATCH - 1);
-    if (error) throw new Error(`load ${table}: ${error.message}`);
-    if (!data || data.length === 0) break;
-    for (const r of data as any[]) map.set(r.bracket_hash, r.id);
-    if (data.length < BATCH) break;
-    from += BATCH;
-    process.stdout.write(`  ${map.size.toLocaleString()} loaded\r`);
-  }
+  for (const r of res.rows) map.set(String(r.bracket_hash), r.id);
   console.log(`  ${map.size.toLocaleString()} brackets in ${table}`);
   return map;
 }
@@ -106,7 +108,17 @@ async function exportGender(gender: "mens" | "womens") {
     console.error(`❌ Parquet not found at ${cfg.parquet}`); process.exit(1);
   }
 
-  const hashToId = await loadHashToId(cfg.table);
+  console.log(`Connecting to Postgres...`);
+  const client = pgClientFromUrl(databaseUrl);
+  await client.connect();
+
+  let hashToId: Map<string, number>;
+  try {
+    hashToId = await loadHashToId(client, cfg.table);
+  } finally {
+    await client.end();
+  }
+
   const N = hashToId.size;
   if (N === 0) { console.error(`❌ No rows in ${cfg.table}`); return; }
   const ids = Array.from(hashToId.values()).sort((a, b) => a - b);
@@ -114,7 +126,6 @@ async function exportGender(gender: "mens" | "womens") {
   const dense = (maxId - minId + 1) === N && minId === 1;
   console.log(`  id range ${minId}..${maxId} (count=${N}, dense=${dense})`);
 
-  // Build the buffer. Allocate maxId * 126 bytes (zero-padded for any gaps).
   const fileSize = maxId * RECORD_SIZE;
   console.log(`  Allocating ${(fileSize / 1024 / 1024).toFixed(1)} MB buffer...`);
   const buf = Buffer.alloc(fileSize);
@@ -129,17 +140,9 @@ async function exportGender(gender: "mens" | "womens") {
   while ((row = await cursor.next())) {
     const hash = String(row.bracket_hash);
     const id = hashToId.get(hash);
-    if (id === undefined) {
-      rowsMissing++;
-      rowsProcessed++;
-      continue;
-    }
+    if (id === undefined) { rowsMissing++; rowsProcessed++; continue; }
     const picks = parsePicks(row.picks);
-    if (picks.length !== 63) {
-      badPicks++;
-      rowsProcessed++;
-      continue;
-    }
+    if (picks.length !== 63) { badPicks++; rowsProcessed++; continue; }
     const offset = (id - 1) * RECORD_SIZE;
     for (let i = 0; i < 63; i++) {
       buf.writeUInt16LE(picks[i], offset + i * 2);
@@ -154,7 +157,7 @@ async function exportGender(gender: "mens" | "womens") {
   if (rowsMissing) console.warn(`  ⚠ ${rowsMissing.toLocaleString()} parquet rows had no matching id in ${cfg.table}`);
   if (badPicks)    console.warn(`  ⚠ ${badPicks.toLocaleString()} parquet rows had picks length != 63`);
 
-  // Spot-check: pick 5 random rows and verify
+  // Spot-check 5 random rows
   console.log(`  Spot-checking 5 random rows against Supabase...`);
   const sampleHashes = Array.from(hashToId.keys()).sort(() => Math.random() - 0.5).slice(0, 5);
   for (const h of sampleHashes) {
@@ -184,7 +187,6 @@ async function exportGender(gender: "mens" | "womens") {
     return;
   }
 
-  // Upload to Vercel Blob.
   if (!process.env.BLOB_READ_WRITE_TOKEN) {
     console.warn(`  ⚠ BLOB_READ_WRITE_TOKEN not set. Skipping upload.`);
     console.warn(`     Set it and re-run, or upload manually with the Vercel CLI:`);
@@ -194,7 +196,6 @@ async function exportGender(gender: "mens" | "womens") {
 
   let blobMod: any;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     blobMod = require("@vercel/blob");
   } catch {
     console.warn(`  ⚠ @vercel/blob not installed. Run: npm install @vercel/blob`);
