@@ -4,6 +4,7 @@ import BracketView from "@/components/BracketView";
 import BackButton from "@/components/BackButton";
 import type { BracketDetail } from "@/lib/types";
 import { formatAccuracy } from "@/lib/scoring";
+import { headers } from "next/headers";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -29,8 +30,11 @@ function formatRank(rank: number | null): string {
 }
 
 async function getBracket(hash: string): Promise<BracketDetail | null> {
-  const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
-  const res = await fetch(`${baseUrl}/api/brackets/${hash}`, { cache: 'no-store' });
+  const headersList = await headers();
+  const host = headersList.get("host");
+  const protocol = process.env.NODE_ENV === "production" ? "https" : "http";
+  const baseUrl = `${protocol}://${host}`;
+  const res = await fetch(`${baseUrl}/api/brackets/${hash}`, { cache: "no-store" });
   if (!res.ok) return null;
   return res.json();
 }
